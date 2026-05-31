@@ -2,7 +2,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context};
 use fs2::FileExt;
@@ -33,6 +33,14 @@ pub struct PoolDevice {
     pub name: String,
     pub udid: String,
     pub lease_id: Option<String>,
+    #[serde(default)]
+    pub lease_expires_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LeaseOptions {
+    pub wait_timeout: Duration,
+    pub ttl: Duration,
 }
 
 pub struct PoolService {
@@ -74,6 +82,7 @@ impl PoolService {
                     name,
                     udid,
                     lease_id: None,
+                    lease_expires_at: None,
                 });
             }
 
@@ -90,20 +99,27 @@ impl PoolService {
     }
 
     pub fn status(&mut self) -> anyhow::Result<PoolState> {
-        self.with_locked_state(|file| read_state(file))
+        self.with_locked_state(|file| {
+            let mut state = read_state(file)?;
+            if reap_expired_leases(&mut state, now_unix_seconds()?) {
+                write_state(file, &state)?;
+            }
+            Ok(state)
+        })
     }
 
     pub fn lease<S: Simctl>(
         &mut self,
         simctl: &mut S,
         lease_id: &str,
-        wait_timeout: Duration,
+        options: LeaseOptions,
     ) -> anyhow::Result<PoolDevice> {
         validate_lease_id(lease_id)?;
-        let deadline = Instant::now() + wait_timeout;
+        validate_ttl(options.ttl)?;
+        let deadline = Instant::now() + options.wait_timeout;
 
         loop {
-            match self.try_lease_once(lease_id)? {
+            match self.try_lease_once(lease_id, options.ttl)? {
                 LeaseAttempt::Leased(device) => {
                     if let Err(error) = simctl.boot_if_needed(&device.udid) {
                         self.clear_lease_if_matches(lease_id, &device.udid)?;
@@ -131,6 +147,7 @@ impl PoolService {
             for device in &mut state.devices {
                 if device.lease_id.as_deref() == Some(lease_id) {
                     device.lease_id = None;
+                    device.lease_expires_at = None;
                     released = true;
                 }
             }
@@ -138,6 +155,31 @@ impl PoolService {
                 write_state(file, &state)?;
             }
             Ok(released)
+        })
+    }
+
+    pub fn renew(&mut self, lease_id: &str, ttl: Duration) -> anyhow::Result<PoolDevice> {
+        validate_lease_id(lease_id)?;
+        validate_ttl(ttl)?;
+        self.with_locked_state(|file| {
+            let mut state = read_state(file)?;
+            let now = now_unix_seconds()?;
+            let reaped = reap_expired_leases_at(&mut state, now);
+            let expires_at = expires_at(now, ttl)?;
+            if let Some(device) = state
+                .devices
+                .iter_mut()
+                .find(|device| device.lease_id.as_deref() == Some(lease_id))
+            {
+                device.lease_expires_at = Some(expires_at);
+                let renewed = device.clone();
+                write_state(file, &state)?;
+                return Ok(renewed);
+            }
+            if reaped {
+                write_state(file, &state)?;
+            }
+            bail!("no active lease found for {lease_id}");
         })
     }
 
@@ -161,15 +203,21 @@ impl PoolService {
         })
     }
 
-    fn try_lease_once(&mut self, lease_id: &str) -> anyhow::Result<LeaseAttempt> {
+    fn try_lease_once(&mut self, lease_id: &str, ttl: Duration) -> anyhow::Result<LeaseAttempt> {
         self.with_locked_state(|file| {
             let mut state = read_state(file)?;
+            let now = now_unix_seconds()?;
+            let changed = reap_expired_leases_at(&mut state, now);
+            let lease_expires_at = expires_at(now, ttl)?;
             if let Some(device) = state
                 .devices
-                .iter()
+                .iter_mut()
                 .find(|device| device.lease_id.as_deref() == Some(lease_id))
             {
-                return Ok(LeaseAttempt::Leased(device.clone()));
+                device.lease_expires_at = Some(lease_expires_at);
+                let leased = device.clone();
+                write_state(file, &state)?;
+                return Ok(LeaseAttempt::Leased(leased));
             }
 
             if let Some(device) = state
@@ -178,11 +226,15 @@ impl PoolService {
                 .find(|device| device.lease_id.is_none())
             {
                 device.lease_id = Some(lease_id.to_string());
+                device.lease_expires_at = Some(lease_expires_at);
                 let leased = device.clone();
                 write_state(file, &state)?;
                 return Ok(LeaseAttempt::Leased(leased));
             }
 
+            if changed {
+                write_state(file, &state)?;
+            }
             Ok(LeaseAttempt::Full)
         })
     }
@@ -194,6 +246,7 @@ impl PoolService {
             for device in &mut state.devices {
                 if device.udid == udid && device.lease_id.as_deref() == Some(lease_id) {
                     device.lease_id = None;
+                    device.lease_expires_at = None;
                     changed = true;
                 }
             }
@@ -249,6 +302,45 @@ fn validate_lease_id(lease_id: &str) -> anyhow::Result<()> {
         bail!("lease id must not be empty");
     }
     Ok(())
+}
+
+fn validate_ttl(ttl: Duration) -> anyhow::Result<()> {
+    if ttl.is_zero() {
+        bail!("ttl must be greater than zero");
+    }
+    Ok(())
+}
+
+fn reap_expired_leases(state: &mut PoolState, now: u64) -> bool {
+    reap_expired_leases_at(state, now)
+}
+
+fn reap_expired_leases_at(state: &mut PoolState, now: u64) -> bool {
+    let mut changed = false;
+    for device in &mut state.devices {
+        if device.lease_id.is_some()
+            && device
+                .lease_expires_at
+                .is_some_and(|expires| expires <= now)
+        {
+            device.lease_id = None;
+            device.lease_expires_at = None;
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn now_unix_seconds() -> anyhow::Result<u64> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before Unix epoch")?
+        .as_secs())
+}
+
+fn expires_at(now: u64, ttl: Duration) -> anyhow::Result<u64> {
+    now.checked_add(ttl.as_secs())
+        .context("lease expiry timestamp overflowed")
 }
 
 fn read_state(file: &mut File) -> anyhow::Result<PoolState> {

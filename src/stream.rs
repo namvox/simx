@@ -813,10 +813,14 @@ fn is_resume_message(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
     use super::{
-        is_resume_message, parse_next_ws_event, slug_path, slug_path_slash, stats_path,
-        stream_path, websocket_accept, WsEvent,
+        is_resume_message, lease_is_active, parse_next_ws_event, slug_path, slug_path_slash,
+        stats_path, stream_path, websocket_accept, ServeConfig, StreamStats, WsEvent,
     };
+    use tempfile::TempDir;
 
     #[test]
     fn computes_websocket_accept_header() {
@@ -847,6 +851,47 @@ mod tests {
             _ => panic!("expected text event"),
         }
         assert!(frame.is_empty());
+    }
+
+    #[test]
+    fn lease_check_reaps_expired_serve_lease() {
+        let temp = TempDir::new().unwrap();
+        let state_path = temp.path().join("pool.json");
+        std::fs::write(
+            &state_path,
+            r#"{
+  "version": 1,
+  "size": 1,
+  "device_type_id": "device",
+  "runtime_id": "runtime",
+  "devices": [
+    {
+      "name": "simx-pool-001",
+      "udid": "UDID-1",
+      "lease_id": "browser",
+      "lease_expires_at": 1
+    }
+  ]
+}
+"#,
+        )
+        .unwrap();
+        let config = ServeConfig {
+            host: "127.0.0.1".to_string(),
+            port: 8080,
+            quality: 0.7,
+            fps: 120,
+            idle_timeout: Duration::from_secs(300),
+            slug: "browser".to_string(),
+            udid: "UDID-1".to_string(),
+            state_path: state_path.clone(),
+            stats: Arc::new(Mutex::new(StreamStats::default())),
+        };
+
+        assert!(!lease_is_active(&config).unwrap());
+        let raw = std::fs::read_to_string(state_path).unwrap();
+        assert!(raw.contains(r#""lease_id": null"#));
+        assert!(raw.contains(r#""lease_expires_at": null"#));
     }
 
     fn masked_text_frame(text: &str) -> Vec<u8> {

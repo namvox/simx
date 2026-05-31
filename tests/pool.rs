@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use simx::pool::{PoolConfig, PoolService};
+use simx::pool::{LeaseOptions, PoolConfig, PoolService};
 use simx::simctl::{DeviceSpec, RuntimeSpec, Simctl};
 use tempfile::TempDir;
 
@@ -82,6 +82,24 @@ fn service_path(temp: &TempDir) -> PathBuf {
     temp.path().join("pool.json")
 }
 
+fn lease_options(ttl: Duration) -> LeaseOptions {
+    LeaseOptions {
+        wait_timeout: Duration::from_millis(1),
+        ttl,
+    }
+}
+
+fn short_lease_options() -> LeaseOptions {
+    lease_options(Duration::from_secs(30))
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
 #[test]
 fn init_creates_fixed_pool_devices() {
     let temp = TempDir::new().unwrap();
@@ -130,15 +148,52 @@ fn lease_reuses_existing_lease_and_boots_allocated_device() {
         .unwrap();
 
     let first = service
-        .lease(&mut simctl, "agent-a", Duration::from_millis(1))
+        .lease(&mut simctl, "agent-a", short_lease_options())
         .unwrap();
     let second = service
-        .lease(&mut simctl, "agent-a", Duration::from_millis(1))
+        .lease(&mut simctl, "agent-a", short_lease_options())
         .unwrap();
 
     assert_eq!(first.udid, second.udid);
     assert_eq!(first.lease_id.as_deref(), Some("agent-a"));
     assert!(simctl.booted.contains(&first.udid));
+}
+
+#[test]
+fn same_slug_lease_extends_ttl_and_returns_same_device() {
+    let temp = TempDir::new().unwrap();
+    let mut simctl = FakeSimctl::with_pool_devices(1);
+    let mut service = PoolService::new(service_path(&temp));
+    service
+        .init(
+            &mut simctl,
+            PoolConfig {
+                size: 1,
+                device_type: None,
+                runtime: None,
+            },
+        )
+        .unwrap();
+
+    let first = service
+        .lease(
+            &mut simctl,
+            "agent-a",
+            lease_options(Duration::from_secs(1)),
+        )
+        .unwrap();
+    thread::sleep(Duration::from_secs(1));
+    let second = service
+        .lease(
+            &mut simctl,
+            "agent-a",
+            lease_options(Duration::from_secs(30)),
+        )
+        .unwrap();
+
+    assert_eq!(first.udid, second.udid);
+    assert_eq!(second.lease_id.as_deref(), Some("agent-a"));
+    assert!(second.lease_expires_at.unwrap() >= unix_now() + 20);
 }
 
 #[test]
@@ -158,15 +213,118 @@ fn different_leases_get_different_devices_and_full_pool_times_out() {
         .unwrap();
 
     let first = service
-        .lease(&mut simctl, "agent-a", Duration::from_millis(1))
+        .lease(&mut simctl, "agent-a", short_lease_options())
         .unwrap();
     let second = service
-        .lease(&mut simctl, "agent-b", Duration::from_millis(1))
+        .lease(&mut simctl, "agent-b", short_lease_options())
         .unwrap();
-    let third = service.lease(&mut simctl, "agent-c", Duration::from_millis(1));
+    let third = service.lease(&mut simctl, "agent-c", short_lease_options());
 
     assert_ne!(first.udid, second.udid);
     assert!(third.is_err());
+}
+
+#[test]
+fn expired_lease_is_reclaimed_for_different_slug() {
+    let temp = TempDir::new().unwrap();
+    let mut simctl = FakeSimctl::with_pool_devices(1);
+    let mut service = PoolService::new(service_path(&temp));
+    service
+        .init(
+            &mut simctl,
+            PoolConfig {
+                size: 1,
+                device_type: None,
+                runtime: None,
+            },
+        )
+        .unwrap();
+
+    let first = service
+        .lease(
+            &mut simctl,
+            "agent-a",
+            lease_options(Duration::from_secs(1)),
+        )
+        .unwrap();
+    thread::sleep(Duration::from_secs(2));
+    let second = service
+        .lease(&mut simctl, "agent-b", short_lease_options())
+        .unwrap();
+
+    assert_eq!(first.udid, second.udid);
+    assert_eq!(second.lease_id.as_deref(), Some("agent-b"));
+}
+
+#[test]
+fn status_reaps_expired_leases() {
+    let temp = TempDir::new().unwrap();
+    let mut simctl = FakeSimctl::with_pool_devices(1);
+    let mut service = PoolService::new(service_path(&temp));
+    service
+        .init(
+            &mut simctl,
+            PoolConfig {
+                size: 1,
+                device_type: None,
+                runtime: None,
+            },
+        )
+        .unwrap();
+
+    service
+        .lease(
+            &mut simctl,
+            "agent-a",
+            lease_options(Duration::from_secs(1)),
+        )
+        .unwrap();
+    thread::sleep(Duration::from_secs(2));
+
+    let state = service.status().unwrap();
+    assert_eq!(state.devices[0].lease_id, None);
+    assert_eq!(state.devices[0].lease_expires_at, None);
+}
+
+#[test]
+fn renew_extends_active_lease_and_fails_after_expiry() {
+    let temp = TempDir::new().unwrap();
+    let mut simctl = FakeSimctl::with_pool_devices(1);
+    let mut service = PoolService::new(service_path(&temp));
+    service
+        .init(
+            &mut simctl,
+            PoolConfig {
+                size: 1,
+                device_type: None,
+                runtime: None,
+            },
+        )
+        .unwrap();
+
+    let leased = service
+        .lease(
+            &mut simctl,
+            "agent-a",
+            lease_options(Duration::from_secs(30)),
+        )
+        .unwrap();
+    let renewed = service.renew("agent-a", Duration::from_secs(60)).unwrap();
+    assert_eq!(leased.udid, renewed.udid);
+    assert!(renewed.lease_expires_at.unwrap() >= unix_now() + 50);
+
+    assert!(service.renew("missing", Duration::from_secs(60)).is_err());
+
+    service.release("agent-a").unwrap();
+    service
+        .lease(
+            &mut simctl,
+            "agent-a",
+            lease_options(Duration::from_secs(1)),
+        )
+        .unwrap();
+    thread::sleep(Duration::from_secs(2));
+    assert!(service.renew("agent-a", Duration::from_secs(60)).is_err());
 }
 
 #[test]
@@ -186,11 +344,11 @@ fn release_keeps_device_available_without_shutdown() {
         .unwrap();
 
     let first = service
-        .lease(&mut simctl, "agent-a", Duration::from_millis(1))
+        .lease(&mut simctl, "agent-a", short_lease_options())
         .unwrap();
     service.release("agent-a").unwrap();
     let second = service
-        .lease(&mut simctl, "agent-b", Duration::from_millis(1))
+        .lease(&mut simctl, "agent-b", short_lease_options())
         .unwrap();
 
     assert_eq!(first.udid, second.udid);
@@ -218,11 +376,25 @@ fn concurrent_leases_cannot_claim_the_same_device() {
     let second_path = state_path;
     let first = thread::spawn(move || {
         let mut simctl = FakeSimctl::with_pool_devices(1);
-        PoolService::new(first_path).lease(&mut simctl, "agent-a", Duration::from_millis(10))
+        PoolService::new(first_path).lease(
+            &mut simctl,
+            "agent-a",
+            LeaseOptions {
+                wait_timeout: Duration::from_millis(10),
+                ttl: Duration::from_secs(30),
+            },
+        )
     });
     let second = thread::spawn(move || {
         let mut simctl = FakeSimctl::with_pool_devices(1);
-        PoolService::new(second_path).lease(&mut simctl, "agent-b", Duration::from_millis(10))
+        PoolService::new(second_path).lease(
+            &mut simctl,
+            "agent-b",
+            LeaseOptions {
+                wait_timeout: Duration::from_millis(10),
+                ttl: Duration::from_secs(30),
+            },
+        )
     });
 
     let results = vec![first.join().unwrap(), second.join().unwrap()];
