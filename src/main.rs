@@ -1,6 +1,3 @@
 fn main() {
-    if let Err(error) = simx::cli::run() {
-        eprintln!("{error:#}");
-        std::process::exit(1);
-    }
+    std::process::exit(simx::cli::main_entry());
 }

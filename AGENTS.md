@@ -18,6 +18,8 @@ simx status
 simx lease --slug browser --ttl 10m
 simx lease --slug browser --ttl 10m --json
 simx renew --slug browser --ttl 10m
+simx serve --slug browser --port 8080
+simx doctor --json
 simx release --slug browser
 simx clean
 ```
@@ -55,6 +57,7 @@ http://127.0.0.1:8080/browser/stats
 - Prefer focused tests for pool state transitions and WebSocket protocol behavior.
 - Before claiming streaming works, manually verify:
   - `cargo test` passes.
+  - `simx doctor --json` passes.
   - `http://127.0.0.1:<port>/<slug>` serves the viewer.
   - `ws://127.0.0.1:<port>/<slug>/stream` emits binary JPEG frames.
   - `/<slug>/stats` reports target FPS, frame counts, drops, and latency.

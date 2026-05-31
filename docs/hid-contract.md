@@ -88,6 +88,28 @@ Tap example:
 { "type": "touch", "phase": "ended", "id": 1, "nx": 0.85, "ny": 0.46, "pressure": 0 }
 ```
 
+## Drag And Swipe
+
+`drag` and `swipe` are high-level helpers that expand into touch-down, move, and touch-up HID messages.
+
+```json
+{
+  "type": "swipe",
+  "id": "gesture-1",
+  "ack": true,
+  "from": { "nx": 0.5, "ny": 0.8 },
+  "to": { "nx": 0.5, "ny": 0.2 },
+  "steps": 12
+}
+```
+
+Fields:
+
+- `type`: `"drag"` or `"swipe"`.
+- `from`: object with `nx` and `ny` start coordinates.
+- `to`: object with `nx` and `ny` end coordinates.
+- `steps`: optional number of move steps, clamped to `2..=60`.
+
 ## Keyboard
 
 Keyboard messages use browser `KeyboardEvent.code` values. `simx` maps those codes to USB HID usage IDs before sending them through SimulatorKit.
@@ -116,6 +138,7 @@ Fields:
 - `key`: browser character value. Currently accepted for compatibility and debugging; not used for mapping.
 - `repeat`: browser repeat flag. Currently accepted for compatibility; repeat behavior is not special-cased.
 - `modifiers`: current modifier state. Currently accepted for compatibility; modifier auto-chording is not implemented yet.
+- `ack`: optional boolean. When `true`, the server replies with an acknowledgement.
 
 Supported `code` values:
 
@@ -154,6 +177,35 @@ Typing `m` example:
 { "type": "key", "phase": "up", "key": "m", "code": "KeyM", "repeat": false }
 ```
 
+Modifier example:
+
+```json
+{
+  "type": "key",
+  "id": "shift-a",
+  "ack": true,
+  "phase": "down",
+  "key": "A",
+  "code": "KeyA",
+  "modifiers": { "shift": true }
+}
+```
+
+## Paste Text
+
+Paste expands supported characters into key down/up events.
+
+```json
+{
+  "type": "paste",
+  "id": "paste-1",
+  "ack": true,
+  "text": "maps"
+}
+```
+
+Supported pasted characters currently include ASCII letters, digits, space, newline, and common punctuation: `- _ = + , < . > / ?`.
+
 ## Hardware Buttons
 
 Home button:
@@ -170,6 +222,46 @@ Only `home` is currently supported. The native bridge tries the same SimulatorKi
 - Consumer-control Menu usage.
 - Consumer-control Home usage.
 - Legacy hardware button fallback targets.
+
+## Acknowledgements
+
+Messages with `"ack": true` receive a JSON text response:
+
+```json
+{
+  "type": "ack",
+  "id": "paste-1",
+  "ok": true,
+  "message": "ok"
+}
+```
+
+If a viewer-only client sends input while another client owns control, the server replies:
+
+```json
+{
+  "type": "ack",
+  "id": "paste-1",
+  "ok": false,
+  "message": "client is viewer-only"
+}
+```
+
+## Multi-Client Control
+
+Multiple clients can connect to one stream. The first WebSocket client becomes the controller and may send HID input. Later clients are viewers and receive frames but cannot control the simulator until the controller disconnects and they reconnect.
+
+The server sends a role message on connect:
+
+```json
+{ "type": "client", "role": "controller" }
+```
+
+or:
+
+```json
+{ "type": "client", "role": "viewer" }
+```
 
 ## Error Handling
 

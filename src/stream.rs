@@ -1,7 +1,9 @@
+use std::collections::VecDeque;
 use std::ffi::{c_char, c_uchar, c_ulong, c_void, CStr, CString};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::ptr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -15,6 +17,7 @@ use crate::pool::PoolService;
 
 const VIEWER_HTML: &str = include_str!("../viewer/index.html");
 const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone)]
 pub struct ServeConfig {
@@ -27,6 +30,7 @@ pub struct ServeConfig {
     pub udid: String,
     pub state_path: std::path::PathBuf,
     pub stats: Arc<Mutex<StreamStats>>,
+    pub controllers: Arc<Mutex<Option<u64>>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -47,16 +51,33 @@ pub struct StreamStats {
     pub uptime_ms: u128,
     pub source_fps: f64,
     pub sent_fps: f64,
+    pub source_fps_1s: f64,
+    pub source_fps_5s: f64,
+    pub sent_fps_1s: f64,
+    pub sent_fps_5s: f64,
+    pub bytes_per_second_1s: f64,
+    pub bytes_per_second_5s: f64,
+    pub encode_latency_ms_p50: Option<u128>,
+    pub encode_latency_ms_p95: Option<u128>,
     pub last_frame_age_ms: Option<u128>,
     pub last_send_age_ms: Option<u128>,
     pub last_delivery_latency_ms: Option<u128>,
     pub paused: bool,
+    pub controller_connected: bool,
     #[serde(skip_serializing)]
     started_at: Option<Instant>,
     #[serde(skip_serializing)]
     last_source_at: Option<Instant>,
     #[serde(skip_serializing)]
     last_sent_at: Option<Instant>,
+    #[serde(skip_serializing)]
+    source_samples: VecDeque<Instant>,
+    #[serde(skip_serializing)]
+    sent_samples: VecDeque<Instant>,
+    #[serde(skip_serializing)]
+    byte_samples: VecDeque<(Instant, usize)>,
+    #[serde(skip_serializing)]
+    latency_samples: VecDeque<u128>,
 }
 
 pub fn serve(config: ServeConfig) -> anyhow::Result<()> {
@@ -117,7 +138,8 @@ fn lease_is_active(config: &ServeConfig) -> anyhow::Result<bool> {
 fn handle_connection(mut stream: TcpStream, config: ServeConfig) -> anyhow::Result<()> {
     stream.set_nonblocking(false)?;
     let request = read_http_request(&mut stream)?;
-    let path = request_path(&request).unwrap_or("/");
+    let target = request_path(&request).unwrap_or("/");
+    let path = target.split('?').next().unwrap_or(target);
     if is_ws_upgrade(&request) && path == stream_path(&config.slug) {
         let key = header_value(&request, "sec-websocket-key")
             .context("missing Sec-WebSocket-Key")?
@@ -182,6 +204,8 @@ fn slug_path_slash(slug: &str) -> String {
 
 fn stream_frames(mut stream: TcpStream, config: ServeConfig) -> anyhow::Result<()> {
     let frame_source = NativeFrameSource::start(&config)?;
+    let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
+    let is_controller = acquire_controller(&config, client_id);
     let frame_interval = Duration::from_secs_f64(1.0 / config.fps as f64);
     let mut last_lease_check = Instant::now();
     let mut last_activity = Instant::now();
@@ -192,8 +216,23 @@ fn stream_frames(mut stream: TcpStream, config: ServeConfig) -> anyhow::Result<(
         stats.connected_clients = stats.connected_clients.saturating_add(1);
         stats.target_fps = config.fps;
         stats.paused = false;
+        stats.controller_connected = is_controller;
     });
     let _client_stats = ClientStatsGuard::new(config.stats.clone());
+    let _controller = ControllerGuard::new(
+        config.controllers.clone(),
+        config.stats.clone(),
+        client_id,
+        is_controller,
+    );
+    write_ws_text(
+        &mut stream,
+        if is_controller {
+            r#"{"type":"client","role":"controller"}"#
+        } else {
+            r#"{"type":"client","role":"viewer"}"#
+        },
+    )?;
     loop {
         let events = read_ws_events(&mut stream, &mut input_buffer);
         let mut should_close = false;
@@ -205,10 +244,24 @@ fn stream_frames(mut stream: TcpStream, config: ServeConfig) -> anyhow::Result<(
                         last_activity = Instant::now();
                         update_stats(&config, |stats| stats.paused = false);
                         write_ws_text(&mut stream, r#"{"type":"resumed"}"#)?;
-                    } else {
+                    } else if is_controller {
                         last_activity = Instant::now();
-                        if let Err(error) = frame_source.handle_input(&text) {
-                            eprintln!("input error: {error:#}");
+                        match frame_source.handle_input(&text) {
+                            Ok(acks) => {
+                                for ack in acks {
+                                    write_ws_text(&mut stream, &ack)?;
+                                }
+                            }
+                            Err(error) => {
+                                if let Some(ack) = input_ack(&text, false, &error.to_string()) {
+                                    write_ws_text(&mut stream, &ack)?;
+                                }
+                                eprintln!("input error: {error:#}");
+                            }
+                        }
+                    } else {
+                        if let Some(ack) = input_ack(&text, false, "client is viewer-only") {
+                            write_ws_text(&mut stream, &ack)?;
                         }
                     }
                 }
@@ -254,7 +307,19 @@ fn stream_frames(mut stream: TcpStream, config: ServeConfig) -> anyhow::Result<(
                 stats.dropped_frames = stats.dropped_frames.saturating_add(dropped);
                 stats.last_frame_bytes = frame.len();
                 stats.last_sent_at = Some(now);
-                stats.last_delivery_latency_ms = Some(now.duration_since(received_at).as_millis());
+                let latency = now.duration_since(received_at).as_millis();
+                stats.last_delivery_latency_ms = Some(latency);
+                push_sample(&mut stats.sent_samples, now, Duration::from_secs(5));
+                push_byte_sample(
+                    &mut stats.byte_samples,
+                    now,
+                    frame.len(),
+                    Duration::from_secs(5),
+                );
+                stats.latency_samples.push_back(latency);
+                while stats.latency_samples.len() > 240 {
+                    stats.latency_samples.pop_front();
+                }
             });
         }
         thread::sleep(frame_interval);
@@ -284,6 +349,55 @@ impl Drop for ClientStatsGuard {
     }
 }
 
+struct ControllerGuard {
+    controllers: Arc<Mutex<Option<u64>>>,
+    stats: Arc<Mutex<StreamStats>>,
+    client_id: u64,
+    active: bool,
+}
+
+impl ControllerGuard {
+    fn new(
+        controllers: Arc<Mutex<Option<u64>>>,
+        stats: Arc<Mutex<StreamStats>>,
+        client_id: u64,
+        active: bool,
+    ) -> Self {
+        Self {
+            controllers,
+            stats,
+            client_id,
+            active,
+        }
+    }
+}
+
+impl Drop for ControllerGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        if let Ok(mut controller) = self.controllers.lock() {
+            if controller.as_ref() == Some(&self.client_id) {
+                *controller = None;
+                if let Ok(mut stats) = self.stats.lock() {
+                    stats.controller_connected = false;
+                }
+            }
+        }
+    }
+}
+
+fn acquire_controller(config: &ServeConfig, client_id: u64) -> bool {
+    if let Ok(mut controller) = config.controllers.lock() {
+        if controller.is_none() {
+            *controller = Some(client_id);
+            return true;
+        }
+    }
+    false
+}
+
 fn snapshot_stats(config: &ServeConfig) -> StreamStats {
     let mut stats = config
         .stats
@@ -299,6 +413,22 @@ fn snapshot_stats(config: &ServeConfig) -> StreamStats {
             stats.sent_fps = stats.sent_frames as f64 / elapsed_secs;
         }
     }
+    prune_samples(&mut stats.source_samples, now, Duration::from_secs(5));
+    prune_samples(&mut stats.sent_samples, now, Duration::from_secs(5));
+    prune_byte_samples(&mut stats.byte_samples, now, Duration::from_secs(5));
+    stats.source_fps_1s = count_since(&stats.source_samples, now, Duration::from_secs(1)) as f64;
+    stats.source_fps_5s =
+        count_since(&stats.source_samples, now, Duration::from_secs(5)) as f64 / 5.0;
+    stats.sent_fps_1s = count_since(&stats.sent_samples, now, Duration::from_secs(1)) as f64;
+    stats.sent_fps_5s = count_since(&stats.sent_samples, now, Duration::from_secs(5)) as f64 / 5.0;
+    stats.bytes_per_second_1s =
+        bytes_since(&stats.byte_samples, now, Duration::from_secs(1)) as f64;
+    stats.bytes_per_second_5s =
+        bytes_since(&stats.byte_samples, now, Duration::from_secs(5)) as f64 / 5.0;
+    let mut latencies: Vec<_> = stats.latency_samples.iter().copied().collect();
+    latencies.sort_unstable();
+    stats.encode_latency_ms_p50 = percentile(&latencies, 50);
+    stats.encode_latency_ms_p95 = percentile(&latencies, 95);
     stats.last_frame_age_ms = stats
         .last_source_at
         .map(|last_source_at| now.duration_since(last_source_at).as_millis());
@@ -315,6 +445,62 @@ fn update_stats(config: &ServeConfig, update: impl FnOnce(&mut StreamStats)) {
         }
         update(&mut stats);
     }
+}
+
+fn push_sample(samples: &mut VecDeque<Instant>, now: Instant, window: Duration) {
+    samples.push_back(now);
+    prune_samples(samples, now, window);
+}
+
+fn prune_samples(samples: &mut VecDeque<Instant>, now: Instant, window: Duration) {
+    while samples
+        .front()
+        .is_some_and(|sample| now.duration_since(*sample) > window)
+    {
+        samples.pop_front();
+    }
+}
+
+fn count_since(samples: &VecDeque<Instant>, now: Instant, window: Duration) -> usize {
+    samples
+        .iter()
+        .filter(|sample| now.duration_since(**sample) <= window)
+        .count()
+}
+
+fn push_byte_sample(
+    samples: &mut VecDeque<(Instant, usize)>,
+    now: Instant,
+    bytes: usize,
+    window: Duration,
+) {
+    samples.push_back((now, bytes));
+    prune_byte_samples(samples, now, window);
+}
+
+fn prune_byte_samples(samples: &mut VecDeque<(Instant, usize)>, now: Instant, window: Duration) {
+    while samples
+        .front()
+        .is_some_and(|(sample, _)| now.duration_since(*sample) > window)
+    {
+        samples.pop_front();
+    }
+}
+
+fn bytes_since(samples: &VecDeque<(Instant, usize)>, now: Instant, window: Duration) -> usize {
+    samples
+        .iter()
+        .filter(|(sample, _)| now.duration_since(*sample) <= window)
+        .map(|(_, bytes)| *bytes)
+        .sum()
+}
+
+fn percentile(values: &[u128], percentile: usize) -> Option<u128> {
+    if values.is_empty() {
+        return None;
+    }
+    let index = ((values.len() - 1) * percentile) / 100;
+    values.get(index).copied()
 }
 
 fn read_http_request(stream: &mut TcpStream) -> anyhow::Result<String> {
@@ -404,9 +590,9 @@ impl NativeFrameSource {
         ))
     }
 
-    fn handle_input(&self, text: &str) -> anyhow::Result<()> {
+    fn handle_input(&self, text: &str) -> anyhow::Result<Vec<String>> {
         let value: serde_json::Value = serde_json::from_str(text)?;
-        match value.get("type").and_then(|value| value.as_str()) {
+        let result = match value.get("type").and_then(|value| value.as_str()) {
             Some("touch") => {
                 let nx = value
                     .get("nx")
@@ -423,6 +609,7 @@ impl NativeFrameSource {
                 let down = matches!(phase, "began" | "moved");
                 self.send_touch(nx, ny, down)
             }
+            Some("swipe") | Some("drag") => self.send_drag_or_swipe(&value),
             Some("key") => {
                 let phase = value
                     .get("phase")
@@ -434,10 +621,17 @@ impl NativeFrameSource {
                     .and_then(|value| value.as_str())
                     .unwrap_or("");
                 if let Some(key_code) = browser_code_to_hid(code) {
-                    self.send_key(key_code, down)
+                    self.send_key_with_modifiers(key_code, down, &value)
                 } else {
                     Ok(())
                 }
+            }
+            Some("paste") => {
+                let text = value
+                    .get("text")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                self.send_text(text)
             }
             Some("button")
                 if value.get("button").and_then(|value| value.as_str()) == Some("home") =>
@@ -445,7 +639,85 @@ impl NativeFrameSource {
                 self.press_home()
             }
             _ => Ok(()),
+        };
+        result?;
+        Ok(input_ack(text, true, "ok").into_iter().collect())
+    }
+
+    fn send_drag_or_swipe(&self, value: &serde_json::Value) -> anyhow::Result<()> {
+        let from = value.get("from").unwrap_or(value);
+        let to = value.get("to").unwrap_or(value);
+        let from_x = from
+            .get("nx")
+            .and_then(|value| value.as_f64())
+            .unwrap_or(0.5);
+        let from_y = from
+            .get("ny")
+            .and_then(|value| value.as_f64())
+            .unwrap_or(0.5);
+        let to_x = to
+            .get("nx")
+            .and_then(|value| value.as_f64())
+            .unwrap_or(from_x);
+        let to_y = to
+            .get("ny")
+            .and_then(|value| value.as_f64())
+            .unwrap_or(from_y);
+        let steps = value
+            .get("steps")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(8)
+            .clamp(2, 60);
+        self.send_touch(from_x, from_y, true)?;
+        for step in 1..steps {
+            let ratio = step as f64 / steps as f64;
+            self.send_touch(
+                from_x + (to_x - from_x) * ratio,
+                from_y + (to_y - from_y) * ratio,
+                true,
+            )?;
+            thread::sleep(Duration::from_millis(8));
         }
+        self.send_touch(to_x, to_y, false)
+    }
+
+    fn send_key_with_modifiers(
+        &self,
+        key_code: u16,
+        down: bool,
+        value: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let modifiers = modifier_key_codes(value);
+        if down {
+            for modifier in &modifiers {
+                self.send_key(*modifier, true)?;
+            }
+            self.send_key(key_code, true)
+        } else {
+            self.send_key(key_code, false)?;
+            for modifier in modifiers.iter().rev() {
+                self.send_key(*modifier, false)?;
+            }
+            Ok(())
+        }
+    }
+
+    fn send_text(&self, text: &str) -> anyhow::Result<()> {
+        for ch in text.chars() {
+            let Some((key_code, shift)) = char_to_hid(ch) else {
+                continue;
+            };
+            if shift {
+                self.send_key(0xe1, true)?;
+            }
+            self.send_key(key_code, true)?;
+            self.send_key(key_code, false)?;
+            if shift {
+                self.send_key(0xe1, false)?;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        Ok(())
     }
 
     fn send_touch(&self, nx: f64, ny: f64, down: bool) -> anyhow::Result<()> {
@@ -492,7 +764,91 @@ extern "C" fn native_frame_callback(bytes: *const c_uchar, length: c_ulong, cont
             stats.source_frames = stats.source_frames.saturating_add(1);
             stats.last_frame_bytes = frame.len();
             stats.last_source_at = Some(now);
+            push_sample(&mut stats.source_samples, now, Duration::from_secs(5));
         }
+    }
+}
+
+fn input_ack(text: &str, ok: bool, message: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
+    if value.get("ack").and_then(|value| value.as_bool()) != Some(true) {
+        return None;
+    }
+    let id = value.get("id").cloned().unwrap_or(serde_json::Value::Null);
+    Some(
+        serde_json::json!({
+            "type": "ack",
+            "id": id,
+            "ok": ok,
+            "message": message
+        })
+        .to_string(),
+    )
+}
+
+fn modifier_key_codes(value: &serde_json::Value) -> Vec<u16> {
+    let Some(modifiers) = value.get("modifiers") else {
+        return Vec::new();
+    };
+    let mut keys = Vec::new();
+    if modifiers
+        .get("control")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        keys.push(0xe0);
+    }
+    if modifiers
+        .get("shift")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        keys.push(0xe1);
+    }
+    if modifiers
+        .get("option")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        keys.push(0xe2);
+    }
+    if modifiers
+        .get("command")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        keys.push(0xe3);
+    }
+    keys
+}
+
+fn char_to_hid(ch: char) -> Option<(u16, bool)> {
+    match ch {
+        'a'..='z' => Some((((ch as u8 - b'a') + 0x04) as u16, false)),
+        'A'..='Z' => Some((((ch as u8 - b'A') + 0x04) as u16, true)),
+        '1' => Some((0x1e, false)),
+        '2' => Some((0x1f, false)),
+        '3' => Some((0x20, false)),
+        '4' => Some((0x21, false)),
+        '5' => Some((0x22, false)),
+        '6' => Some((0x23, false)),
+        '7' => Some((0x24, false)),
+        '8' => Some((0x25, false)),
+        '9' => Some((0x26, false)),
+        '0' => Some((0x27, false)),
+        ' ' => Some((0x2c, false)),
+        '\n' => Some((0x28, false)),
+        '-' => Some((0x2d, false)),
+        '_' => Some((0x2d, true)),
+        '=' => Some((0x2e, false)),
+        '+' => Some((0x2e, true)),
+        ',' => Some((0x36, false)),
+        '<' => Some((0x36, true)),
+        '.' => Some((0x37, false)),
+        '>' => Some((0x37, true)),
+        '/' => Some((0x38, false)),
+        '?' => Some((0x38, true)),
+        _ => None,
     }
 }
 
@@ -817,8 +1173,9 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        is_resume_message, lease_is_active, parse_next_ws_event, slug_path, slug_path_slash,
-        stats_path, stream_path, websocket_accept, ServeConfig, StreamStats, WsEvent,
+        acquire_controller, char_to_hid, input_ack, is_resume_message, lease_is_active,
+        parse_next_ws_event, slug_path, slug_path_slash, stats_path, stream_path, websocket_accept,
+        ServeConfig, StreamStats, WsEvent,
     };
     use tempfile::TempDir;
 
@@ -854,6 +1211,40 @@ mod tests {
     }
 
     #[test]
+    fn input_ack_preserves_message_id_and_status() {
+        let ack = input_ack(r#"{"type":"paste","id":"msg-1","ack":true}"#, true, "ok").unwrap();
+        assert!(ack.contains(r#""type":"ack""#));
+        assert!(ack.contains(r#""id":"msg-1""#));
+        assert!(ack.contains(r#""ok":true"#));
+        assert!(input_ack(r#"{"type":"paste","id":"msg-1"}"#, true, "ok").is_none());
+    }
+
+    #[test]
+    fn paste_character_mapping_marks_shifted_characters() {
+        assert_eq!(char_to_hid('m'), Some((0x10, false)));
+        assert_eq!(char_to_hid('M'), Some((0x10, true)));
+        assert_eq!(char_to_hid('?'), Some((0x38, true)));
+    }
+
+    #[test]
+    fn only_one_client_acquires_controller_role() {
+        let config = ServeConfig {
+            host: "127.0.0.1".to_string(),
+            port: 8080,
+            quality: 0.7,
+            fps: 120,
+            idle_timeout: Duration::from_secs(300),
+            slug: "browser".to_string(),
+            udid: "UDID-1".to_string(),
+            state_path: TempDir::new().unwrap().path().join("pool.json"),
+            stats: Arc::new(Mutex::new(StreamStats::default())),
+            controllers: Arc::new(Mutex::new(None)),
+        };
+        assert!(acquire_controller(&config, 1));
+        assert!(!acquire_controller(&config, 2));
+    }
+
+    #[test]
     fn lease_check_reaps_expired_serve_lease() {
         let temp = TempDir::new().unwrap();
         let state_path = temp.path().join("pool.json");
@@ -886,6 +1277,7 @@ mod tests {
             udid: "UDID-1".to_string(),
             state_path: state_path.clone(),
             stats: Arc::new(Mutex::new(StreamStats::default())),
+            controllers: Arc::new(Mutex::new(None)),
         };
 
         assert!(!lease_is_active(&config).unwrap());

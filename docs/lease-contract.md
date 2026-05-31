@@ -93,6 +93,12 @@ Use `lease` when the agent is allowed to reclaim a simulator if its previous lea
 ## Serve
 
 ```sh
+simx serve --slug <slug>
+```
+
+or:
+
+```sh
 simx lease --slug <slug> --serve [--ttl <duration>]
 ```
 
@@ -100,6 +106,7 @@ Behavior:
 
 - Claims or reuses the lease.
 - Starts the HTTP/WebSocket viewer.
+- Records the serve process PID in pool state.
 - Stops serving when the lease is released or expires.
 
 ## Release
@@ -112,7 +119,7 @@ Behavior:
 
 - Clears the active lease for the slug.
 - Keeps the simulator booted.
-- Stops a matching `--serve` process on its next lease check.
+- Sends `SIGTERM` to a tracked matching serve process and also lets the serve loop stop on its next lease check.
 
 ## Status
 
@@ -124,6 +131,7 @@ Behavior:
 
 - Reaps expired leases before printing.
 - Prints each device with owner and expiry. Idle devices show `idle -`.
+- `simx status --json` returns stable machine-readable device, lease, expiry, serve PID, and serve URL fields.
 
 ## Clean
 

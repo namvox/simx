@@ -315,7 +315,7 @@ fn renew_extends_active_lease_and_fails_after_expiry() {
 
     assert!(service.renew("missing", Duration::from_secs(60)).is_err());
 
-    service.release("agent-a").unwrap();
+    assert!(service.release("agent-a").unwrap().released);
     service
         .lease(
             &mut simctl,
@@ -346,7 +346,7 @@ fn release_keeps_device_available_without_shutdown() {
     let first = service
         .lease(&mut simctl, "agent-a", short_lease_options())
         .unwrap();
-    service.release("agent-a").unwrap();
+    assert!(service.release("agent-a").unwrap().released);
     let second = service
         .lease(&mut simctl, "agent-b", short_lease_options())
         .unwrap();
@@ -424,4 +424,36 @@ fn clean_shuts_down_deletes_devices_and_removes_state() {
     assert_eq!(simctl.shutdown, vec!["UDID-1", "UDID-2"]);
     assert_eq!(simctl.deleted, vec!["UDID-1", "UDID-2"]);
     assert!(service.status().is_err());
+}
+
+#[test]
+fn release_returns_tracked_serve_process_and_clears_it() {
+    let temp = TempDir::new().unwrap();
+    let mut simctl = FakeSimctl::with_pool_devices(1);
+    let mut service = PoolService::new(service_path(&temp));
+    service
+        .init(
+            &mut simctl,
+            PoolConfig {
+                size: 1,
+                device_type: None,
+                runtime: None,
+            },
+        )
+        .unwrap();
+    let device = service
+        .lease(&mut simctl, "agent-a", short_lease_options())
+        .unwrap();
+    service
+        .register_serve("agent-a", &device.udid, 12345, "127.0.0.1", 8080)
+        .unwrap();
+
+    let released = service.release("agent-a").unwrap();
+    assert!(released.released);
+    assert_eq!(released.serve_processes.len(), 1);
+    assert_eq!(released.serve_processes[0].pid, 12345);
+
+    let state = service.status().unwrap();
+    assert_eq!(state.devices[0].serve_pid, None);
+    assert_eq!(state.devices[0].lease_id, None);
 }

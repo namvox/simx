@@ -35,6 +35,12 @@ pub struct PoolDevice {
     pub lease_id: Option<String>,
     #[serde(default)]
     pub lease_expires_at: Option<u64>,
+    #[serde(default)]
+    pub serve_pid: Option<u32>,
+    #[serde(default)]
+    pub serve_host: Option<String>,
+    #[serde(default)]
+    pub serve_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -83,6 +89,9 @@ impl PoolService {
                     udid,
                     lease_id: None,
                     lease_expires_at: None,
+                    serve_pid: None,
+                    serve_host: None,
+                    serve_port: None,
                 });
             }
 
@@ -139,13 +148,23 @@ impl PoolService {
         }
     }
 
-    pub fn release(&mut self, lease_id: &str) -> anyhow::Result<bool> {
+    pub fn release(&mut self, lease_id: &str) -> anyhow::Result<ReleaseResult> {
         validate_lease_id(lease_id)?;
         self.with_locked_state(|file| {
             let mut state = read_state(file)?;
             let mut released = false;
+            let mut serve_processes = Vec::new();
             for device in &mut state.devices {
                 if device.lease_id.as_deref() == Some(lease_id) {
+                    if let Some(pid) = device.serve_pid.take() {
+                        serve_processes.push(ServeProcess {
+                            pid,
+                            slug: lease_id.to_string(),
+                            udid: device.udid.clone(),
+                            host: device.serve_host.take(),
+                            port: device.serve_port.take(),
+                        });
+                    }
                     device.lease_id = None;
                     device.lease_expires_at = None;
                     released = true;
@@ -154,7 +173,10 @@ impl PoolService {
             if released {
                 write_state(file, &state)?;
             }
-            Ok(released)
+            Ok(ReleaseResult {
+                released,
+                serve_processes,
+            })
         })
     }
 
@@ -203,6 +225,69 @@ impl PoolService {
         })
     }
 
+    pub fn active_lease(&mut self, lease_id: &str) -> anyhow::Result<PoolDevice> {
+        validate_lease_id(lease_id)?;
+        self.with_locked_state(|file| {
+            let mut state = read_state(file)?;
+            let now = now_unix_seconds()?;
+            let reaped = reap_expired_leases_at(&mut state, now);
+            let device = state
+                .devices
+                .iter()
+                .find(|device| device.lease_id.as_deref() == Some(lease_id))
+                .cloned();
+            if reaped {
+                write_state(file, &state)?;
+            }
+            device.with_context(|| format!("no active lease found for {lease_id}"))
+        })
+    }
+
+    pub fn register_serve(
+        &mut self,
+        lease_id: &str,
+        udid: &str,
+        pid: u32,
+        host: &str,
+        port: u16,
+    ) -> anyhow::Result<()> {
+        validate_lease_id(lease_id)?;
+        self.with_locked_state(|file| {
+            let mut state = read_state(file)?;
+            let now = now_unix_seconds()?;
+            reap_expired_leases_at(&mut state, now);
+            let device = state
+                .devices
+                .iter_mut()
+                .find(|device| device.udid == udid && device.lease_id.as_deref() == Some(lease_id))
+                .with_context(|| format!("no active lease found for {lease_id}"))?;
+            device.serve_pid = Some(pid);
+            device.serve_host = Some(host.to_string());
+            device.serve_port = Some(port);
+            write_state(file, &state)
+        })
+    }
+
+    pub fn clear_serve(&mut self, lease_id: &str, pid: u32) -> anyhow::Result<()> {
+        validate_lease_id(lease_id)?;
+        self.with_locked_state(|file| {
+            let mut state = read_state(file)?;
+            let mut changed = false;
+            for device in &mut state.devices {
+                if device.lease_id.as_deref() == Some(lease_id) && device.serve_pid == Some(pid) {
+                    device.serve_pid = None;
+                    device.serve_host = None;
+                    device.serve_port = None;
+                    changed = true;
+                }
+            }
+            if changed {
+                write_state(file, &state)?;
+            }
+            Ok(())
+        })
+    }
+
     fn try_lease_once(&mut self, lease_id: &str, ttl: Duration) -> anyhow::Result<LeaseAttempt> {
         self.with_locked_state(|file| {
             let mut state = read_state(file)?;
@@ -247,6 +332,9 @@ impl PoolService {
                 if device.udid == udid && device.lease_id.as_deref() == Some(lease_id) {
                     device.lease_id = None;
                     device.lease_expires_at = None;
+                    device.serve_pid = None;
+                    device.serve_host = None;
+                    device.serve_port = None;
                     changed = true;
                 }
             }
@@ -325,10 +413,28 @@ fn reap_expired_leases_at(state: &mut PoolState, now: u64) -> bool {
         {
             device.lease_id = None;
             device.lease_expires_at = None;
+            device.serve_pid = None;
+            device.serve_host = None;
+            device.serve_port = None;
             changed = true;
         }
     }
     changed
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseResult {
+    pub released: bool,
+    pub serve_processes: Vec<ServeProcess>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServeProcess {
+    pub pid: u32,
+    pub slug: String,
+    pub udid: String,
+    pub host: Option<String>,
+    pub port: Option<u16>,
 }
 
 fn now_unix_seconds() -> anyhow::Result<u64> {
