@@ -1,7 +1,8 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -9,7 +10,7 @@ use directories::BaseDirs;
 use serde::Serialize;
 
 use crate::pool::{LeaseOptions, PoolConfig, PoolDevice, PoolService};
-use crate::simctl::XcrunSimctl;
+use crate::simctl::{Simctl, XcrunSimctl};
 use crate::stream::{serve, ServeConfig, StreamStats};
 
 #[derive(Debug, Parser)]
@@ -87,6 +88,38 @@ enum Command {
         #[arg(long, default_value = "5m", value_parser = parse_duration)]
         idle_timeout: Duration,
     },
+    /// Build, install, and launch the app in the current Xcode project.
+    Run {
+        #[arg(long)]
+        slug: String,
+        #[arg(long)]
+        project: Option<PathBuf>,
+        #[arg(long)]
+        scheme: Option<String>,
+        #[arg(long, default_value = "Debug")]
+        configuration: String,
+        #[arg(long)]
+        derived_data_path: Option<PathBuf>,
+        #[arg(long)]
+        bundle_id: Option<String>,
+        #[arg(long)]
+        no_launch: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Install and launch an app bundle on an active lease.
+    Install {
+        #[arg(long)]
+        slug: String,
+        #[arg(long)]
+        app: PathBuf,
+        #[arg(long)]
+        bundle_id: Option<String>,
+        #[arg(long)]
+        no_launch: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Extend an active simulator lease.
     Renew {
         #[arg(long)]
@@ -141,6 +174,30 @@ struct StatusDeviceOutput {
     lease_expires_at_rfc3339: Option<String>,
     serve_pid: Option<u32>,
     serve_url: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct RunOutput<'a> {
+    slug: &'a str,
+    udid: &'a str,
+    run_state: String,
+    log: String,
+    project: String,
+    scheme: String,
+    configuration: String,
+    derived_data_path: String,
+    app: String,
+    bundle_id: String,
+    launched: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct InstallOutput<'a> {
+    slug: &'a str,
+    udid: &'a str,
+    app: String,
+    bundle_id: String,
+    launched: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -343,6 +400,45 @@ fn run_with(cli: Cli, state_path: PathBuf) -> anyhow::Result<()> {
                 state_path,
             )?;
         }
+        Command::Run {
+            slug,
+            project,
+            scheme,
+            configuration,
+            derived_data_path,
+            bundle_id,
+            no_launch,
+            json,
+        } => {
+            let device = service.active_lease(&slug)?;
+            simctl
+                .boot_if_needed(&device.udid)
+                .with_context(|| format!("failed to boot {}", device.udid))?;
+            run_xcode_app(RunAppCommand {
+                slug,
+                udid: device.udid,
+                project,
+                scheme,
+                configuration,
+                derived_data_path,
+                bundle_id,
+                launch: !no_launch,
+                json,
+            })?;
+        }
+        Command::Install {
+            slug,
+            app,
+            bundle_id,
+            no_launch,
+            json,
+        } => {
+            let device = service.active_lease(&slug)?;
+            simctl
+                .boot_if_needed(&device.udid)
+                .with_context(|| format!("failed to boot {}", device.udid))?;
+            install_app_command(&slug, &device.udid, &app, bundle_id, !no_launch, json)?;
+        }
         Command::Release { slug } => {
             let released = service.release(&slug)?;
             for process in &released.serve_processes {
@@ -435,6 +531,434 @@ fn run_serve(
     result.and(clear_result)
 }
 
+struct RunAppCommand {
+    slug: String,
+    udid: String,
+    project: Option<PathBuf>,
+    scheme: Option<String>,
+    configuration: String,
+    derived_data_path: Option<PathBuf>,
+    bundle_id: Option<String>,
+    launch: bool,
+    json: bool,
+}
+
+fn run_xcode_app(command: RunAppCommand) -> anyhow::Result<()> {
+    let project = resolve_xcode_project(command.project.as_deref())?;
+    let scheme = command
+        .scheme
+        .unwrap_or_else(|| default_scheme_for_project(&project));
+    let derived_data_path = command
+        .derived_data_path
+        .unwrap_or_else(|| default_derived_data_path(&command.slug));
+    let log_path = default_run_log_path(&command.slug)?;
+    build_xcode_app(
+        &project,
+        &scheme,
+        &command.configuration,
+        &command.udid,
+        &derived_data_path,
+        &log_path,
+    )?;
+    let app = find_built_app(&derived_data_path, &command.configuration, &scheme)?;
+    let bundle_id = install_app(&command.udid, &app, command.bundle_id, command.launch)?;
+    let run_state_path = write_run_state(RunStateInput {
+        slug: &command.slug,
+        udid: &command.udid,
+        project: &project,
+        scheme: &scheme,
+        configuration: &command.configuration,
+        derived_data_path: &derived_data_path,
+        app: &app,
+        bundle_id: &bundle_id,
+        log: &log_path,
+        launched: command.launch,
+    })?;
+
+    if command.json {
+        let output = RunOutput {
+            slug: &command.slug,
+            udid: &command.udid,
+            run_state: run_state_path.display().to_string(),
+            log: log_path.display().to_string(),
+            project: project.display().to_string(),
+            scheme,
+            configuration: command.configuration,
+            derived_data_path: derived_data_path.display().to_string(),
+            app: app.display().to_string(),
+            bundle_id,
+            launched: command.launch,
+        };
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!("built {}", project.display());
+        println!("installed {}", app.display());
+        println!("wrote {}", run_state_path.display());
+        println!("log {}", log_path.display());
+        if command.launch {
+            println!("launched {bundle_id}");
+        }
+    }
+    Ok(())
+}
+
+fn install_app_command(
+    slug: &str,
+    udid: &str,
+    app: &Path,
+    bundle_id: Option<String>,
+    launch: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    let bundle_id = install_app(udid, app, bundle_id, launch)?;
+    if json {
+        let output = InstallOutput {
+            slug,
+            udid,
+            app: app.display().to_string(),
+            bundle_id,
+            launched: launch,
+        };
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!("installed {}", app.display());
+        if launch {
+            println!("launched {bundle_id}");
+        }
+    }
+    Ok(())
+}
+
+struct RunStateInput<'a> {
+    slug: &'a str,
+    udid: &'a str,
+    project: &'a Path,
+    scheme: &'a str,
+    configuration: &'a str,
+    derived_data_path: &'a Path,
+    app: &'a Path,
+    bundle_id: &'a str,
+    log: &'a Path,
+    launched: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct RunState<'a> {
+    version: u32,
+    slug: &'a str,
+    udid: &'a str,
+    project: String,
+    scheme: &'a str,
+    configuration: &'a str,
+    derived_data_path: String,
+    app: String,
+    bundle_id: &'a str,
+    log: String,
+    launched: bool,
+    updated_at: String,
+}
+
+fn write_run_state(input: RunStateInput<'_>) -> anyhow::Result<PathBuf> {
+    let path = PathBuf::from(".simx").join("run.json");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let state = RunState {
+        version: 1,
+        slug: input.slug,
+        udid: input.udid,
+        project: input.project.display().to_string(),
+        scheme: input.scheme,
+        configuration: input.configuration,
+        derived_data_path: input.derived_data_path.display().to_string(),
+        app: input.app.display().to_string(),
+        bundle_id: input.bundle_id,
+        log: input.log.display().to_string(),
+        launched: input.launched,
+        updated_at: format_unix_timestamp(now_unix_seconds()?),
+    };
+    let json = serde_json::to_string_pretty(&state)?;
+    fs::write(&path, format!("{json}\n"))
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(path)
+}
+
+fn resolve_xcode_project(project: Option<&Path>) -> anyhow::Result<PathBuf> {
+    if let Some(project) = project {
+        validate_xcode_project(project)?;
+        return Ok(project.to_path_buf());
+    }
+
+    let mut projects = Vec::new();
+    for entry in fs::read_dir(".").context("failed to read current directory")? {
+        let path = entry?.path();
+        if is_xcode_project(&path) {
+            projects.push(path);
+        }
+    }
+    projects.sort();
+    match projects.len() {
+        0 => anyhow::bail!("no .xcodeproj found in the current directory"),
+        1 => Ok(projects.remove(0)),
+        _ => anyhow::bail!(
+            "multiple .xcodeproj files found; pass --project explicitly: {}",
+            projects
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+fn validate_xcode_project(project: &Path) -> anyhow::Result<()> {
+    if !is_xcode_project(project) {
+        anyhow::bail!(
+            "project path must point to a .xcodeproj: {}",
+            project.display()
+        );
+    }
+    Ok(())
+}
+
+fn is_xcode_project(path: &Path) -> bool {
+    path.exists()
+        && path.is_dir()
+        && path.extension().and_then(|value| value.to_str()) == Some("xcodeproj")
+}
+
+fn default_scheme_for_project(project: &Path) -> String {
+    project
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("App")
+        .to_string()
+}
+
+fn default_derived_data_path(slug: &str) -> PathBuf {
+    PathBuf::from(".simx")
+        .join("DerivedData")
+        .join(safe_path_component(slug))
+}
+
+fn default_run_log_path(slug: &str) -> anyhow::Result<PathBuf> {
+    Ok(PathBuf::from(".simx").join("logs").join(format!(
+        "{}-{}-xcodebuild.log",
+        now_unix_seconds()?,
+        safe_path_component(slug)
+    )))
+}
+
+fn safe_path_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+fn build_xcode_app(
+    project: &Path,
+    scheme: &str,
+    configuration: &str,
+    udid: &str,
+    derived_data_path: &Path,
+    log_path: &Path,
+) -> anyhow::Result<()> {
+    let output = ProcessCommand::new("/usr/bin/xcodebuild")
+        .arg("-project")
+        .arg(project)
+        .arg("-scheme")
+        .arg(scheme)
+        .arg("-configuration")
+        .arg(configuration)
+        .arg("-destination")
+        .arg(format!("platform=iOS Simulator,id={udid}"))
+        .arg("-derivedDataPath")
+        .arg(derived_data_path)
+        .arg("build")
+        .output()
+        .context("failed to run xcodebuild")?;
+    write_command_log(log_path, "xcodebuild", &output.stdout, &output.stderr)?;
+    if output.status.success() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "xcodebuild failed; log: {}\n{}",
+        log_path.display(),
+        command_failure_summary(&output.stdout, &output.stderr)
+    );
+}
+
+fn write_command_log(
+    log_path: &Path,
+    command_name: &str,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> anyhow::Result<()> {
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let mut log = String::new();
+    log.push_str("Command: ");
+    log.push_str(command_name);
+    log.push_str("\n\n--- stdout ---\n");
+    log.push_str(&String::from_utf8_lossy(stdout));
+    log.push_str("\n--- stderr ---\n");
+    log.push_str(&String::from_utf8_lossy(stderr));
+    fs::write(log_path, log).with_context(|| format!("failed to write {}", log_path.display()))
+}
+
+fn command_failure_summary(stdout: &[u8], stderr: &[u8]) -> String {
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(stdout),
+        String::from_utf8_lossy(stderr)
+    );
+    let lines = combined
+        .lines()
+        .filter(|line| {
+            line.contains("error:")
+                || line.contains("fatal error:")
+                || line.contains("BUILD FAILED")
+                || line.contains("Testing failed")
+        })
+        .take(20)
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        combined
+            .lines()
+            .rev()
+            .take(20)
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        lines.join("\n")
+    }
+}
+
+fn find_built_app(
+    derived_data_path: &Path,
+    configuration: &str,
+    scheme: &str,
+) -> anyhow::Result<PathBuf> {
+    let products_dir = derived_data_path
+        .join("Build")
+        .join("Products")
+        .join(format!("{configuration}-iphonesimulator"));
+    let expected = products_dir.join(format!("{scheme}.app"));
+    if expected.exists() {
+        return Ok(expected);
+    }
+
+    let mut apps = Vec::new();
+    for entry in fs::read_dir(&products_dir).with_context(|| {
+        format!(
+            "failed to read build products at {}",
+            products_dir.display()
+        )
+    })? {
+        let path = entry?.path();
+        if validate_app_path(&path).is_ok() {
+            apps.push(path);
+        }
+    }
+    apps.sort();
+    match apps.len() {
+        0 => anyhow::bail!("no built .app found under {}", products_dir.display()),
+        1 => Ok(apps.remove(0)),
+        _ => anyhow::bail!(
+            "multiple .app bundles found; pass --scheme to disambiguate: {}",
+            apps.iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+fn install_app(
+    udid: &str,
+    app: &Path,
+    bundle_id: Option<String>,
+    launch: bool,
+) -> anyhow::Result<String> {
+    validate_app_path(app)?;
+    let bundle_id = match bundle_id {
+        Some(bundle_id) => bundle_id,
+        None => infer_bundle_id(app)?,
+    };
+    run_simctl(["install", udid, path_as_str(app)?])?;
+    if launch {
+        run_simctl(["launch", udid, &bundle_id])?;
+    }
+    Ok(bundle_id)
+}
+
+fn validate_app_path(app: &Path) -> anyhow::Result<()> {
+    if !app.exists() {
+        anyhow::bail!("app path does not exist: {}", app.display());
+    }
+    if !app.is_dir() || app.extension().and_then(|value| value.to_str()) != Some("app") {
+        anyhow::bail!("app path must point to a .app bundle: {}", app.display());
+    }
+    Ok(())
+}
+
+fn infer_bundle_id(app: &Path) -> anyhow::Result<String> {
+    let info_plist = app.join("Info.plist");
+    if !info_plist.exists() {
+        anyhow::bail!(
+            "could not infer bundle id because Info.plist is missing: {}",
+            info_plist.display()
+        );
+    }
+    let output = ProcessCommand::new("/usr/bin/plutil")
+        .args(["-extract", "CFBundleIdentifier", "raw", "-o", "-"])
+        .arg(&info_plist)
+        .output()
+        .context("failed to run plutil")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "could not infer bundle id: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let bundle_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if bundle_id.is_empty() {
+        anyhow::bail!("could not infer bundle id because CFBundleIdentifier is empty");
+    }
+    Ok(bundle_id)
+}
+
+fn run_simctl<const N: usize>(args: [&str; N]) -> anyhow::Result<()> {
+    let output = ProcessCommand::new("/usr/bin/xcrun")
+        .arg("simctl")
+        .args(args)
+        .output()
+        .context("failed to run xcrun simctl")?;
+    if output.status.success() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "simctl {} failed: {}",
+        args.first().copied().unwrap_or("command"),
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+}
+
+fn path_as_str(path: &Path) -> anyhow::Result<&str> {
+    path.to_str()
+        .with_context(|| format!("path is not valid UTF-8: {}", path.display()))
+}
+
 fn print_lease(
     slug: &str,
     device: &PoolDevice,
@@ -473,6 +997,13 @@ fn format_unix_timestamp(timestamp: u64) -> String {
     humantime::format_rfc3339_seconds(UNIX_EPOCH + Duration::from_secs(timestamp)).to_string()
 }
 
+fn now_unix_seconds() -> anyhow::Result<u64> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before Unix epoch")?
+        .as_secs())
+}
+
 fn parse_duration(raw: &str) -> Result<Duration, String> {
     humantime::parse_duration(raw).map_err(|error| error.to_string())
 }
@@ -493,7 +1024,14 @@ fn error_code(error: &anyhow::Error) -> &'static str {
         "lease_not_found"
     } else if message.contains("doctor found failing") {
         "doctor_failed"
-    } else if message.contains("ttl must") || message.contains("lease id must") {
+    } else if message.contains("ttl must")
+        || message.contains("lease id must")
+        || message.contains("app path")
+        || message.contains(".xcodeproj")
+        || message.contains("xcodebuild failed")
+        || message.contains("could not infer bundle id")
+        || message.contains("path is not valid UTF-8")
+    {
         "invalid_argument"
     } else {
         "internal"
@@ -610,5 +1148,68 @@ fn default_state_path() -> anyhow::Result<PathBuf> {
     #[cfg(not(target_os = "macos"))]
     {
         bail!("simx currently supports macOS only");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+
+    #[test]
+    fn infer_bundle_id_reads_app_info_plist() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("Example.app");
+        fs::create_dir(&app).unwrap();
+        fs::write(
+            app.join("Info.plist"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>ai.boncasa.example</string>
+</dict>
+</plist>
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(infer_bundle_id(&app).unwrap(), "ai.boncasa.example");
+    }
+
+    #[test]
+    fn validate_app_path_requires_app_bundle_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("Example.txt");
+        fs::write(&file, "not an app").unwrap();
+
+        assert!(validate_app_path(&file).is_err());
+    }
+
+    #[test]
+    fn validate_xcode_project_requires_xcodeproj_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("Example.xcodeproj");
+        fs::create_dir(&project).unwrap();
+        let file = temp.path().join("Example.txt");
+        fs::write(&file, "not a project").unwrap();
+
+        assert!(validate_xcode_project(&project).is_ok());
+        assert!(validate_xcode_project(&file).is_err());
+    }
+
+    #[test]
+    fn default_scheme_uses_project_name() {
+        assert_eq!(
+            default_scheme_for_project(Path::new("Lumi.xcodeproj")),
+            "Lumi"
+        );
+    }
+
+    #[test]
+    fn safe_path_component_replaces_unsafe_characters() {
+        assert_eq!(safe_path_component("agent/one two"), "agent-one-two");
     }
 }
