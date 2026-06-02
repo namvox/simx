@@ -7,6 +7,7 @@ This is the stable command surface intended for agents.
 ```sh
 simx lease --slug agent-a --ttl 10m --json
 simx renew --slug agent-a --ttl 10m --json
+simx install --slug agent-a --app path/to/App.app --json
 simx run --slug agent-a --json
 simx status --json
 simx doctor --json
@@ -31,6 +32,14 @@ Status returns:
 - device type
 - runtime
 - per-device UDID, slug, expiry, serve PID, and serve URL
+
+Install returns:
+
+- `slug`
+- `udid`
+- `app`
+- `bundle_id`
+- `launched`
 
 Run returns:
 
@@ -90,6 +99,17 @@ simx serve --slug agent-a --host 127.0.0.1 --port 8080
 ```
 
 `simx serve` requires an active lease. It records its PID in pool state. `simx release --slug agent-a` clears the lease and sends `SIGTERM` to the tracked serve process.
+
+## Install And Launch
+
+Agents should lease first, then install:
+
+```sh
+simx lease --slug agent-a --ttl 10m --json
+simx install --slug agent-a --app path/to/App.app
+```
+
+`simx install` requires an active lease. It installs the `.app` bundle on the leased simulator and launches it by default. If `--bundle-id` is omitted, `simx` reads `CFBundleIdentifier` from the app bundle's `Info.plist`. Use `--no-launch` to install without launching.
 
 ## Build, Install, And Launch
 

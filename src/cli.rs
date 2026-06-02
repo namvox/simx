@@ -107,6 +107,19 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Install and launch an app bundle on an active lease.
+    Install {
+        #[arg(long)]
+        slug: String,
+        #[arg(long)]
+        app: PathBuf,
+        #[arg(long)]
+        bundle_id: Option<String>,
+        #[arg(long)]
+        no_launch: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Extend an active simulator lease.
     Renew {
         #[arg(long)]
@@ -172,6 +185,15 @@ struct RunOutput<'a> {
     scheme: String,
     configuration: String,
     derived_data_path: String,
+    app: String,
+    bundle_id: String,
+    launched: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct InstallOutput<'a> {
+    slug: &'a str,
+    udid: &'a str,
     app: String,
     bundle_id: String,
     launched: bool,
@@ -403,6 +425,19 @@ fn run_with(cli: Cli, state_path: PathBuf) -> anyhow::Result<()> {
                 json,
             })?;
         }
+        Command::Install {
+            slug,
+            app,
+            bundle_id,
+            no_launch,
+            json,
+        } => {
+            let device = service.active_lease(&slug)?;
+            simctl
+                .boot_if_needed(&device.udid)
+                .with_context(|| format!("failed to boot {}", device.udid))?;
+            install_app_command(&slug, &device.udid, &app, bundle_id, !no_launch, json)?;
+        }
         Command::Release { slug } => {
             let released = service.release(&slug)?;
             for process in &released.serve_processes {
@@ -555,6 +590,33 @@ fn run_xcode_app(command: RunAppCommand) -> anyhow::Result<()> {
         println!("installed {}", app.display());
         println!("wrote {}", run_state_path.display());
         if command.launch {
+            println!("launched {bundle_id}");
+        }
+    }
+    Ok(())
+}
+
+fn install_app_command(
+    slug: &str,
+    udid: &str,
+    app: &Path,
+    bundle_id: Option<String>,
+    launch: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    let bundle_id = install_app(udid, app, bundle_id, launch)?;
+    if json {
+        let output = InstallOutput {
+            slug,
+            udid,
+            app: app.display().to_string(),
+            bundle_id,
+            launched: launch,
+        };
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!("installed {}", app.display());
+        if launch {
             println!("launched {bundle_id}");
         }
     }

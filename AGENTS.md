@@ -19,6 +19,7 @@ simx lease --slug browser --ttl 10m
 simx lease --slug browser --ttl 10m --json
 simx renew --slug browser --ttl 10m
 simx serve --slug browser --port 8080
+simx install --slug browser --app path/to/App.app
 simx run --slug browser
 simx doctor --json
 simx release --slug browser
@@ -50,6 +51,7 @@ http://127.0.0.1:8080/browser/stats
 - Streaming uses CoreSimulator/SimulatorKit private APIs through `native/src/simx_bridge.m`.
 - The stream path sends JPEG frames as binary WebSocket messages.
 - Browser input sends JSON text messages for touch, keyboard, resume, and Home.
+- `simx install --slug ... --app ...` installs a `.app` bundle on the active lease, infers `CFBundleIdentifier` from `Info.plist`, and launches it by default.
 - `simx run --slug ...` validates the current folder has one `.xcodeproj`, builds it for the active lease, installs the built `.app`, infers `CFBundleIdentifier` from `Info.plist`, writes `.simx/run.json`, and launches it by default.
 - Do not reintroduce `simctl io screenshot` polling for streaming.
 
