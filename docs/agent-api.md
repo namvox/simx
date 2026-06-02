@@ -46,6 +46,7 @@ Run returns:
 - `slug`
 - `udid`
 - `run_state`
+- `log`
 - `project`
 - `scheme`
 - `configuration`
@@ -120,7 +121,7 @@ simx lease --slug agent-a --ttl 10m --json
 simx run --slug agent-a
 ```
 
-`simx run` requires an active lease. It validates the current directory has exactly one `.xcodeproj` unless `--project` is provided. It builds the project with `xcodebuild`, targeting the leased simulator UDID, then installs the built `.app` on that simulator, writes `.simx/run.json`, and launches it by default.
+`simx run` requires an active lease. It validates the current directory has exactly one `.xcodeproj` unless `--project` is provided. It builds the project quietly with `xcodebuild`, targeting the leased simulator UDID, writes the build log under `.simx/logs/`, then installs the built `.app` on that simulator, writes `.simx/run.json`, and launches it by default.
 
 Defaults:
 
@@ -131,7 +132,9 @@ Defaults:
 
 Use `--no-launch` to build and install without launching.
 
-`.simx/run.json` is temporary worktree-local state. It records the last run's slug, simulator UDID, project, scheme, derived data path, app bundle, bundle id, launch flag, and update timestamp. Projects should ignore `.simx/` in git.
+`.simx/run.json` is temporary worktree-local state. It records the last run's slug, simulator UDID, project, scheme, derived data path, app bundle, bundle id, build log path, launch flag, and update timestamp. Projects should ignore `.simx/` in git.
+
+`simx run` does not stream build output by default. Agents should inspect the returned `log` path only when they need build details, especially after a failed command.
 
 ## Doctor
 

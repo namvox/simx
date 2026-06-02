@@ -181,6 +181,7 @@ struct RunOutput<'a> {
     slug: &'a str,
     udid: &'a str,
     run_state: String,
+    log: String,
     project: String,
     scheme: String,
     configuration: String,
@@ -550,12 +551,14 @@ fn run_xcode_app(command: RunAppCommand) -> anyhow::Result<()> {
     let derived_data_path = command
         .derived_data_path
         .unwrap_or_else(|| default_derived_data_path(&command.slug));
+    let log_path = default_run_log_path(&command.slug)?;
     build_xcode_app(
         &project,
         &scheme,
         &command.configuration,
         &command.udid,
         &derived_data_path,
+        &log_path,
     )?;
     let app = find_built_app(&derived_data_path, &command.configuration, &scheme)?;
     let bundle_id = install_app(&command.udid, &app, command.bundle_id, command.launch)?;
@@ -568,6 +571,7 @@ fn run_xcode_app(command: RunAppCommand) -> anyhow::Result<()> {
         derived_data_path: &derived_data_path,
         app: &app,
         bundle_id: &bundle_id,
+        log: &log_path,
         launched: command.launch,
     })?;
 
@@ -576,6 +580,7 @@ fn run_xcode_app(command: RunAppCommand) -> anyhow::Result<()> {
             slug: &command.slug,
             udid: &command.udid,
             run_state: run_state_path.display().to_string(),
+            log: log_path.display().to_string(),
             project: project.display().to_string(),
             scheme,
             configuration: command.configuration,
@@ -589,6 +594,7 @@ fn run_xcode_app(command: RunAppCommand) -> anyhow::Result<()> {
         println!("built {}", project.display());
         println!("installed {}", app.display());
         println!("wrote {}", run_state_path.display());
+        println!("log {}", log_path.display());
         if command.launch {
             println!("launched {bundle_id}");
         }
@@ -632,6 +638,7 @@ struct RunStateInput<'a> {
     derived_data_path: &'a Path,
     app: &'a Path,
     bundle_id: &'a str,
+    log: &'a Path,
     launched: bool,
 }
 
@@ -646,6 +653,7 @@ struct RunState<'a> {
     derived_data_path: String,
     app: String,
     bundle_id: &'a str,
+    log: String,
     launched: bool,
     updated_at: String,
 }
@@ -666,6 +674,7 @@ fn write_run_state(input: RunStateInput<'_>) -> anyhow::Result<PathBuf> {
         derived_data_path: input.derived_data_path.display().to_string(),
         app: input.app.display().to_string(),
         bundle_id: input.bundle_id,
+        log: input.log.display().to_string(),
         launched: input.launched,
         updated_at: format_unix_timestamp(now_unix_seconds()?),
     };
@@ -733,6 +742,14 @@ fn default_derived_data_path(slug: &str) -> PathBuf {
         .join(safe_path_component(slug))
 }
 
+fn default_run_log_path(slug: &str) -> anyhow::Result<PathBuf> {
+    Ok(PathBuf::from(".simx").join("logs").join(format!(
+        "{}-{}-xcodebuild.log",
+        now_unix_seconds()?,
+        safe_path_component(slug)
+    )))
+}
+
 fn safe_path_component(value: &str) -> String {
     value
         .chars()
@@ -752,6 +769,7 @@ fn build_xcode_app(
     configuration: &str,
     udid: &str,
     derived_data_path: &Path,
+    log_path: &Path,
 ) -> anyhow::Result<()> {
     let output = ProcessCommand::new("/usr/bin/xcodebuild")
         .arg("-project")
@@ -767,13 +785,35 @@ fn build_xcode_app(
         .arg("build")
         .output()
         .context("failed to run xcodebuild")?;
+    write_command_log(log_path, "xcodebuild", &output.stdout, &output.stderr)?;
     if output.status.success() {
         return Ok(());
     }
     anyhow::bail!(
-        "xcodebuild failed: {}",
+        "xcodebuild failed; log: {}\n{}",
+        log_path.display(),
         command_failure_summary(&output.stdout, &output.stderr)
     );
+}
+
+fn write_command_log(
+    log_path: &Path,
+    command_name: &str,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> anyhow::Result<()> {
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let mut log = String::new();
+    log.push_str("Command: ");
+    log.push_str(command_name);
+    log.push_str("\n\n--- stdout ---\n");
+    log.push_str(&String::from_utf8_lossy(stdout));
+    log.push_str("\n--- stderr ---\n");
+    log.push_str(&String::from_utf8_lossy(stderr));
+    fs::write(log_path, log).with_context(|| format!("failed to write {}", log_path.display()))
 }
 
 fn command_failure_summary(stdout: &[u8], stderr: &[u8]) -> String {
