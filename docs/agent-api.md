@@ -7,6 +7,7 @@ This is the stable command surface intended for agents.
 ```sh
 simx lease --slug agent-a --ttl 10m --json
 simx renew --slug agent-a --ttl 10m --json
+simx run --slug agent-a --json
 simx status --json
 simx doctor --json
 ```
@@ -30,6 +31,19 @@ Status returns:
 - device type
 - runtime
 - per-device UDID, slug, expiry, serve PID, and serve URL
+
+Run returns:
+
+- `slug`
+- `udid`
+- `run_state`
+- `project`
+- `scheme`
+- `configuration`
+- `derived_data_path`
+- `app`
+- `bundle_id`
+- `launched`
 
 ## JSON Errors
 
@@ -76,6 +90,28 @@ simx serve --slug agent-a --host 127.0.0.1 --port 8080
 ```
 
 `simx serve` requires an active lease. It records its PID in pool state. `simx release --slug agent-a` clears the lease and sends `SIGTERM` to the tracked serve process.
+
+## Build, Install, And Launch
+
+Agents should lease first, then run from an app project's root folder:
+
+```sh
+simx lease --slug agent-a --ttl 10m --json
+simx run --slug agent-a
+```
+
+`simx run` requires an active lease. It validates the current directory has exactly one `.xcodeproj` unless `--project` is provided. It builds the project with `xcodebuild`, targeting the leased simulator UDID, then installs the built `.app` on that simulator, writes `.simx/run.json`, and launches it by default.
+
+Defaults:
+
+- `--scheme`: project file stem, for example `Lumi` from `Lumi.xcodeproj`.
+- `--configuration`: `Debug`.
+- `--derived-data-path`: `.simx/DerivedData/<slug>`.
+- `--bundle-id`: inferred from the built app bundle's `Info.plist`.
+
+Use `--no-launch` to build and install without launching.
+
+`.simx/run.json` is temporary worktree-local state. It records the last run's slug, simulator UDID, project, scheme, derived data path, app bundle, bundle id, launch flag, and update timestamp. Projects should ignore `.simx/` in git.
 
 ## Doctor
 
