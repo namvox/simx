@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.1.0 - Unreleased
+## v0.1.0 - 2026-06-03
 
 - Simulator pool lifecycle.
 - Slug-based leasing with TTL and renew.
