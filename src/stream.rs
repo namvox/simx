@@ -533,6 +533,7 @@ struct LatestFrame {
 
 struct FrameContext {
     latest: Mutex<LatestFrame>,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     stats: Arc<Mutex<StreamStats>>,
 }
 

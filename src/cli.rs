@@ -6,7 +6,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use directories::BaseDirs;
 use serde::Serialize;
 
 use crate::pool::{LeaseOptions, PoolConfig, PoolDevice, PoolService};
@@ -1153,9 +1152,9 @@ fn developer_dir_for_doctor() -> Option<String> {
 }
 
 fn default_state_path() -> anyhow::Result<PathBuf> {
-    let base = BaseDirs::new().context("could not resolve home directory")?;
     #[cfg(target_os = "macos")]
     {
+        let base = directories::BaseDirs::new().context("could not resolve home directory")?;
         Ok(base
             .home_dir()
             .join("Library/Application Support/simx/pool.json"))
@@ -1173,6 +1172,7 @@ mod tests {
 
     use super::*;
 
+    #[cfg_attr(not(target_os = "macos"), ignore = "plutil is only available on macOS")]
     #[test]
     fn infer_bundle_id_reads_app_info_plist() {
         let temp = tempfile::tempdir().unwrap();
