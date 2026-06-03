@@ -115,6 +115,32 @@ Fields:
 - `to`: object with `nx` and `ny` end coordinates.
 - `steps`: optional number of move steps, clamped to `2..=60`.
 
+## Long-Press Scroll
+
+`longPressScroll` is a high-level helper that presses, holds, moves in one direction, and releases. It is intended for scroll surfaces that require a held touch before movement.
+
+```json
+{
+  "type": "longPressScroll",
+  "id": "gesture-2",
+  "ack": true,
+  "direction": "up",
+  "at": { "nx": 0.5, "ny": 0.75 },
+  "distance": 0.5,
+  "holdMs": 500,
+  "steps": 12
+}
+```
+
+Fields:
+
+- `type`: `"longPressScroll"`. `"long_press_scroll"` is also accepted for compatibility.
+- `direction`: optional touch movement direction, `"up"`, `"down"`, `"left"`, or `"right"`. Defaults to `"up"`.
+- `at`: optional object with `nx` and `ny` start coordinates. If omitted with the default distance, `"up"` starts at `{ "nx": 0.5, "ny": 0.75 }`, `"down"` starts at `{ "nx": 0.5, "ny": 0.25 }`, `"left"` starts at `{ "nx": 0.75, "ny": 0.5 }`, and `"right"` starts at `{ "nx": 0.25, "ny": 0.5 }`.
+- `distance`: optional normalized movement distance along the selected direction, clamped to `0.05..=1.0`. Defaults to `0.5`.
+- `holdMs`: optional press duration before movement, clamped to `0..=3000`. Defaults to `500`.
+- `steps`: optional number of move steps, clamped to `2..=60`. Defaults to `12`.
+
 ## Keyboard
 
 Keyboard messages use browser `KeyboardEvent.code` values. `simx` maps those codes to USB HID usage IDs before sending them through SimulatorKit.

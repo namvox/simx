@@ -50,6 +50,7 @@ This milestone is complete only when all checks below pass.
 - Keyboard modifiers are sent as HID modifier key down/up events.
 - Paste expands supported text to key events.
 - Drag/swipe expands to touch down/move/up.
+- Long-press scroll expands to held touch down, directional move, and touch up.
 - Messages with `ack: true` receive success or failure acknowledgements.
 
 ## Doctor

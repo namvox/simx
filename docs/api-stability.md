@@ -126,3 +126,7 @@ The core HID/control message families are frozen in `v0.1.0`:
 
 Additive fields and new message types may be added in minor releases. See
 [hid-contract.md](hid-contract.md) for the wire format.
+
+`v0.1.1` adds an additive long-press scroll helper:
+
+- Long-press scroll: `type: "longPressScroll"`.

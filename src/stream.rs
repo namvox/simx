@@ -621,6 +621,9 @@ impl NativeFrameSource {
                 self.send_touch(nx, ny, down)
             }
             Some("swipe") | Some("drag") => self.send_drag_or_swipe(&value),
+            Some("longPressScroll") | Some("long_press_scroll") => {
+                self.send_long_press_scroll(&value)
+            }
             Some("key") => {
                 let phase = value
                     .get("phase")
@@ -690,6 +693,22 @@ impl NativeFrameSource {
             thread::sleep(Duration::from_millis(8));
         }
         self.send_touch(to_x, to_y, false)
+    }
+
+    fn send_long_press_scroll(&self, value: &serde_json::Value) -> anyhow::Result<()> {
+        let plan = long_press_scroll_plan(value);
+        self.send_touch(plan.start_nx, plan.start_ny, true)?;
+        thread::sleep(plan.hold);
+        for step in 1..plan.steps {
+            let ratio = step as f64 / plan.steps as f64;
+            self.send_touch(
+                plan.start_nx + (plan.end_nx - plan.start_nx) * ratio,
+                plan.start_ny + (plan.end_ny - plan.start_ny) * ratio,
+                true,
+            )?;
+            thread::sleep(Duration::from_millis(8));
+        }
+        self.send_touch(plan.end_nx, plan.end_ny, false)
     }
 
     fn send_key_with_modifiers(
@@ -903,6 +922,75 @@ fn developer_dir() -> anyhow::Result<String> {
         );
     }
     Ok(String::from_utf8(output.stdout)?.trim().to_string())
+}
+
+#[derive(Debug, PartialEq)]
+struct LongPressScrollPlan {
+    start_nx: f64,
+    start_ny: f64,
+    end_nx: f64,
+    end_ny: f64,
+    hold: Duration,
+    steps: u64,
+}
+
+fn long_press_scroll_plan(value: &serde_json::Value) -> LongPressScrollPlan {
+    let direction = value
+        .get("direction")
+        .and_then(|value| value.as_str())
+        .unwrap_or("up");
+    let distance = value
+        .get("distance")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(0.5)
+        .clamp(0.05, 1.0);
+    let default_x = match direction {
+        "left" => 1.0 - (distance / 2.0),
+        "right" => distance / 2.0,
+        _ => 0.5,
+    };
+    let default_y = match direction {
+        "down" => distance / 2.0,
+        "left" | "right" => 0.5,
+        _ => 1.0 - (distance / 2.0),
+    };
+    let at = value.get("at").unwrap_or(value);
+    let start_nx = at
+        .get("nx")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(default_x)
+        .clamp(0.0, 1.0);
+    let start_ny = at
+        .get("ny")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(default_y)
+        .clamp(0.0, 1.0);
+    let (delta_x, delta_y) = match direction {
+        "down" => (0.0, distance),
+        "left" => (-distance, 0.0),
+        "right" => (distance, 0.0),
+        _ => (0.0, -distance),
+    };
+    let hold_ms = value
+        .get("holdMs")
+        .or_else(|| value.get("hold_ms"))
+        .and_then(|value| value.as_u64())
+        .unwrap_or(500)
+        .clamp(0, 3_000);
+    let steps = value
+        .get("steps")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(12)
+        .clamp(2, 60);
+
+    LongPressScrollPlan {
+        start_nx,
+        start_ny,
+        end_nx: (start_nx + delta_x).clamp(0.0, 1.0),
+        end_ny: (start_ny + delta_y).clamp(0.0, 1.0),
+        hold: Duration::from_millis(hold_ms),
+        steps,
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1210,9 +1298,10 @@ mod tests {
 
     use super::{
         acquire_controller, char_to_hid, input_ack, is_resume_message, lease_is_active,
-        parse_next_ws_event, slug_path, slug_path_slash, stats_path, stream_path, websocket_accept,
-        ServeConfig, StreamStats, WsEvent,
+        long_press_scroll_plan, parse_next_ws_event, slug_path, slug_path_slash, stats_path,
+        stream_path, websocket_accept, ServeConfig, StreamStats, WsEvent,
     };
+    use serde_json::json;
     use tempfile::TempDir;
 
     #[test]
@@ -1260,6 +1349,63 @@ mod tests {
         assert_eq!(char_to_hid('m'), Some((0x10, false)));
         assert_eq!(char_to_hid('M'), Some((0x10, true)));
         assert_eq!(char_to_hid('?'), Some((0x38, true)));
+    }
+
+    #[test]
+    fn long_press_scroll_defaults_drag_up_from_lower_screen() {
+        let plan = long_press_scroll_plan(&json!({
+            "type": "longPressScroll",
+            "direction": "up"
+        }));
+
+        assert_eq!(plan.start_nx, 0.5);
+        assert_eq!(plan.start_ny, 0.75);
+        assert_eq!(plan.end_nx, 0.5);
+        assert_eq!(plan.end_ny, 0.25);
+        assert_eq!(plan.hold, Duration::from_millis(500));
+        assert_eq!(plan.steps, 12);
+    }
+
+    #[test]
+    fn long_press_scroll_accepts_down_direction_and_clamps_options() {
+        let plan = long_press_scroll_plan(&json!({
+            "type": "longPressScroll",
+            "direction": "down",
+            "at": { "nx": 2.0, "ny": -1.0 },
+            "distance": 2.0,
+            "holdMs": 5_000,
+            "steps": 99
+        }));
+
+        assert_eq!(plan.start_nx, 1.0);
+        assert_eq!(plan.start_ny, 0.0);
+        assert_eq!(plan.end_nx, 1.0);
+        assert_eq!(plan.end_ny, 1.0);
+        assert_eq!(plan.hold, Duration::from_millis(3_000));
+        assert_eq!(plan.steps, 60);
+    }
+
+    #[test]
+    fn long_press_scroll_supports_horizontal_directions() {
+        let left = long_press_scroll_plan(&json!({
+            "type": "longPressScroll",
+            "direction": "left",
+            "distance": 0.4
+        }));
+        let right = long_press_scroll_plan(&json!({
+            "type": "longPressScroll",
+            "direction": "right",
+            "distance": 0.4
+        }));
+
+        assert_float_eq(left.start_nx, 0.8);
+        assert_float_eq(left.start_ny, 0.5);
+        assert_float_eq(left.end_nx, 0.4);
+        assert_float_eq(left.end_ny, 0.5);
+        assert_float_eq(right.start_nx, 0.2);
+        assert_float_eq(right.start_ny, 0.5);
+        assert_float_eq(right.end_nx, 0.6);
+        assert_float_eq(right.end_ny, 0.5);
     }
 
     #[test]
@@ -1331,5 +1477,12 @@ mod tests {
             frame.push(byte ^ mask[index % 4]);
         }
         frame
+    }
+
+    fn assert_float_eq(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < f64::EPSILON,
+            "expected {actual} to equal {expected}"
+        );
     }
 }
