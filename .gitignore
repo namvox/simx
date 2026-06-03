@@ -3,5 +3,9 @@
 /.simx/
 /.build/
 /DerivedData/
+/dist/
 *.log
 *.xcresult/
+.idea/
+.vscode/
+*.swp

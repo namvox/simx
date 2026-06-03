@@ -169,7 +169,7 @@ fn run_json<const N: usize>(args: [&str; N]) -> anyhow::Result<String> {
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    Ok(String::from_utf8(output.stdout).context("xcrun output was not UTF-8")?)
+    String::from_utf8(output.stdout).context("xcrun output was not UTF-8")
 }
 
 fn stderr_contains_already_booted(stderr: &[u8]) -> bool {

@@ -38,8 +38,8 @@ Conservative minimum requirements:
 - Full Xcode installed, not just Command Line Tools.
 - An iOS Simulator runtime installed.
 - Rust stable toolchain for source installs.
-- Apple Silicon and Intel macOS should both be supported unless the native
-  streaming bridge proves otherwise on a specific version.
+- Release binaries are Apple Silicon first. Other macOS architectures should
+  build from source for now.
 - Private Simulator APIs used by streaming may break across macOS, Xcode, and
   iOS Simulator versions.
 

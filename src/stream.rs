@@ -1,7 +1,9 @@
 use std::collections::VecDeque;
+#[cfg(target_os = "macos")]
 use std::ffi::{c_char, c_uchar, c_ulong, c_void, CStr, CString};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+#[cfg(target_os = "macos")]
 use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -535,11 +537,13 @@ struct FrameContext {
 }
 
 struct NativeFrameSource {
+    #[cfg(target_os = "macos")]
     handle: *mut c_void,
     context: Arc<FrameContext>,
 }
 
 impl NativeFrameSource {
+    #[cfg(target_os = "macos")]
     fn start(config: &ServeConfig) -> anyhow::Result<Self> {
         let developer_dir = developer_dir()?;
         let developer_dir = CString::new(developer_dir)?;
@@ -576,6 +580,12 @@ impl NativeFrameSource {
             bail!("{message}");
         }
         Ok(Self { handle, context })
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn start(config: &ServeConfig) -> anyhow::Result<Self> {
+        let _ = config;
+        bail!("streaming requires macOS private Simulator APIs");
     }
 
     fn latest_frame_after(&self, generation: u64) -> Option<(u64, Vec<u8>, Instant)> {
@@ -720,31 +730,53 @@ impl NativeFrameSource {
         Ok(())
     }
 
+    #[cfg(target_os = "macos")]
     fn send_touch(&self, nx: f64, ny: f64, down: bool) -> anyhow::Result<()> {
         let mut error: *mut c_char = ptr::null_mut();
         let ok = unsafe { simx_hid_touch(self.handle, nx, ny, i32::from(down), &mut error) };
         native_bool_result(ok, error)
     }
 
+    #[cfg(not(target_os = "macos"))]
+    fn send_touch(&self, nx: f64, ny: f64, down: bool) -> anyhow::Result<()> {
+        let _ = (nx, ny, down);
+        bail!("HID input requires macOS private Simulator APIs");
+    }
+
+    #[cfg(target_os = "macos")]
     fn send_key(&self, key_code: u16, down: bool) -> anyhow::Result<()> {
         let mut error: *mut c_char = ptr::null_mut();
         let ok = unsafe { simx_hid_key(self.handle, key_code, i32::from(down), &mut error) };
         native_bool_result(ok, error)
     }
 
+    #[cfg(not(target_os = "macos"))]
+    fn send_key(&self, key_code: u16, down: bool) -> anyhow::Result<()> {
+        let _ = (key_code, down);
+        bail!("HID input requires macOS private Simulator APIs");
+    }
+
+    #[cfg(target_os = "macos")]
     fn press_home(&self) -> anyhow::Result<()> {
         let mut error: *mut c_char = ptr::null_mut();
         let ok = unsafe { simx_hid_home(self.handle, &mut error) };
         native_bool_result(ok, error)
     }
+
+    #[cfg(not(target_os = "macos"))]
+    fn press_home(&self) -> anyhow::Result<()> {
+        bail!("HID input requires macOS private Simulator APIs");
+    }
 }
 
+#[cfg(target_os = "macos")]
 impl Drop for NativeFrameSource {
     fn drop(&mut self) {
         unsafe { simx_frame_stream_stop(self.handle) };
     }
 }
 
+#[cfg(target_os = "macos")]
 extern "C" fn native_frame_callback(bytes: *const c_uchar, length: c_ulong, context: *mut c_void) {
     if bytes.is_null() || context.is_null() || length == 0 {
         return;
@@ -852,6 +884,7 @@ fn char_to_hid(ch: char) -> Option<(u16, bool)> {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn developer_dir() -> anyhow::Result<String> {
     if let Ok(value) = std::env::var("DEVELOPER_DIR") {
         if !value.trim().is_empty() {
@@ -871,6 +904,7 @@ fn developer_dir() -> anyhow::Result<String> {
     Ok(String::from_utf8(output.stdout)?.trim().to_string())
 }
 
+#[cfg(target_os = "macos")]
 fn native_bool_result(ok: i32, error: *mut c_char) -> anyhow::Result<()> {
     if ok != 0 {
         return Ok(());
@@ -949,6 +983,7 @@ fn browser_code_to_hid(code: &str) -> Option<u16> {
     }
 }
 
+#[cfg(target_os = "macos")]
 extern "C" {
     fn simx_frame_stream_start(
         developer_dir: *const c_char,

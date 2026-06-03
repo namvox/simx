@@ -62,8 +62,9 @@ This milestone is complete only when all checks below pass.
 - `cargo fmt -- --check` passes.
 - `cargo test` passes.
 - `SIMX_REAL_SIM_TESTS=1 cargo test --test real_pool` is available for gated local real-simulator testing.
-- GitHub Actions runs macOS format/test/build and uploads a release binary artifact.
-- `scripts/install.sh` installs the release binary into `${SIMX_INSTALL_PREFIX:-/usr/local}/bin`.
+- GitHub Actions runs Linux and macOS checks.
+- Tagged releases build and upload the Apple Silicon `simx-aarch64-apple-darwin.tar.gz` artifact.
+- `install.sh` installs the latest Apple Silicon release binary into an auto-detected writable bin directory.
 
 ## Manual Smoke
 

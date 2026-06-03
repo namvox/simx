@@ -1,4 +1,8 @@
 fn main() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
+        return;
+    }
+
     println!("cargo:rerun-if-changed=native/src/simx_bridge.m");
     println!("cargo:rerun-if-changed=native/include/CoreSimulator.h");
     println!("cargo:rerun-if-changed=native/include/SimulatorKit.h");

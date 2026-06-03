@@ -2,39 +2,51 @@ name: CI
 
 on:
   push:
-    branches: [main]
   pull_request:
 
 jobs:
-  test:
-    name: macOS Rust tests
-    runs-on: macos-15
+  linux:
+    name: Linux unit checks
+    runs-on: ubuntu-latest
+    env:
+      SIMX_REAL_SIM_TESTS: "0"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          submodules: true
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
 
       - name: Format
-        run: cargo fmt -- --check
+        run: cargo fmt --check
 
       - name: Test
         run: cargo test
 
-      - name: Build release binary
-        run: cargo build --release
+      - name: Clippy
+        run: cargo clippy -- -D warnings
 
-      - name: Package artifact
-        run: |
-          mkdir -p dist
-          cp target/release/simx dist/simx
-          tar -C dist -czf simx-macos.tar.gz simx
+  macos:
+    name: macOS checks
+    runs-on: macos-15
+    env:
+      SIMX_REAL_SIM_TESTS: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          name: simx-macos
-          path: simx-macos.tar.gz
+          components: clippy, rustfmt
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Test
+        run: cargo test
+
+      - name: Clippy
+        run: cargo clippy -- -D warnings

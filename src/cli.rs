@@ -275,7 +275,7 @@ pub fn run() -> anyhow::Result<()> {
 
 fn run_with(cli: Cli, state_path: PathBuf) -> anyhow::Result<()> {
     let mut service = PoolService::new(state_path.clone());
-    let mut simctl = XcrunSimctl::default();
+    let mut simctl = XcrunSimctl;
 
     match cli.command {
         Command::Init {
@@ -1156,9 +1156,9 @@ fn default_state_path() -> anyhow::Result<PathBuf> {
     let base = BaseDirs::new().context("could not resolve home directory")?;
     #[cfg(target_os = "macos")]
     {
-        return Ok(base
+        Ok(base
             .home_dir()
-            .join("Library/Application Support/simx/pool.json"));
+            .join("Library/Application Support/simx/pool.json"))
     }
 
     #[cfg(not(target_os = "macos"))]
