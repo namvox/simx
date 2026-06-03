@@ -1163,7 +1163,7 @@ fn default_state_path() -> anyhow::Result<PathBuf> {
 
     #[cfg(not(target_os = "macos"))]
     {
-        bail!("simx currently supports macOS only");
+        anyhow::bail!("simx currently supports macOS only");
     }
 }
 
