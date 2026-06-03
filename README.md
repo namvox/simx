@@ -39,7 +39,9 @@ Conservative minimum requirements:
 - An iOS Simulator runtime installed.
 - Rust stable toolchain for source installs.
 - Release binaries are Apple Silicon first. Other macOS architectures should
-  build from source for now.
+  build from source on a best-effort basis for now.
+- Latest stable Xcode on latest stable macOS is recommended. Recent Xcode
+  versions with installed iOS Simulator runtimes are best effort.
 - Private Simulator APIs used by streaming may break across macOS, Xcode, and
   iOS Simulator versions.
 
@@ -48,7 +50,11 @@ Check the local machine:
 ```sh
 simx doctor
 simx doctor --json
+xcode-select -p
+xcrun simctl list runtimes
 ```
+
+See [docs/compatibility.md](docs/compatibility.md) for compatibility details.
 
 ## Stability
 
@@ -79,6 +85,7 @@ curl -fsSL https://github.com/boncasa/simx/releases/latest/download/install.sh |
 
 GitHub Releases need to be set up before the curl installer works. The release
 should publish an `install.sh` asset and any binaries that script downloads.
+See [docs/release.md](docs/release.md) for the release process.
 
 ## Pool Lifecycle
 
@@ -168,6 +175,8 @@ Streaming serves a browser viewer and WebSocket stream for an active lease:
 ```sh
 simx lease --slug browser-preview --ttl 10m --serve --port 8080
 ```
+
+![simx browser streaming demo](docs/assets/simx-browser-streaming.gif)
 
 Open:
 
@@ -262,6 +271,9 @@ Streaming uses private Apple CoreSimulator and SimulatorKit APIs through
 `native/src/simx_bridge.m`. These APIs are undocumented and may change or break
 without notice. Use streaming only where private API use is acceptable for your
 workflow.
+
+See [docs/private-apis.md](docs/private-apis.md) for the full private API and
+network exposure disclosure.
 
 `simx` is not affiliated with, endorsed by, or sponsored by Apple Inc. Apple,
 iOS, macOS, Xcode, and Simulator-related names are trademarks of Apple Inc.
