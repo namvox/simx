@@ -1,2 +1,7 @@
 /target/
 /.DS_Store
+/.simx/
+/.build/
+/DerivedData/
+*.log
+*.xcresult/

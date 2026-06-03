@@ -507,6 +507,7 @@ fn run_serve(
     command: ServeCommand,
     state_path: PathBuf,
 ) -> anyhow::Result<()> {
+    warn_if_non_local_serve_host(&command.host);
     let pid = std::process::id();
     service.register_serve(
         &command.slug,
@@ -529,6 +530,21 @@ fn run_serve(
     });
     let clear_result = service.clear_serve(&command.slug, pid);
     result.and(clear_result)
+}
+
+fn warn_if_non_local_serve_host(host: &str) {
+    if !is_local_serve_host(host) {
+        eprintln!(
+            "warning: simx browser streaming is unauthenticated; binding to {host} may expose simulator streaming and input control on public networks"
+        );
+    }
+}
+
+fn is_local_serve_host(host: &str) -> bool {
+    matches!(
+        host.trim().to_ascii_lowercase().as_str(),
+        "127.0.0.1" | "localhost" | "::1"
+    )
 }
 
 struct RunAppCommand {
@@ -1211,5 +1227,14 @@ mod tests {
     #[test]
     fn safe_path_component_replaces_unsafe_characters() {
         assert_eq!(safe_path_component("agent/one two"), "agent-one-two");
+    }
+
+    #[test]
+    fn local_serve_hosts_do_not_warn() {
+        assert!(is_local_serve_host("127.0.0.1"));
+        assert!(is_local_serve_host("localhost"));
+        assert!(is_local_serve_host("::1"));
+        assert!(!is_local_serve_host("0.0.0.0"));
+        assert!(!is_local_serve_host("192.168.1.10"));
     }
 }

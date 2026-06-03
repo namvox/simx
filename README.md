@@ -54,6 +54,18 @@ where private API use is acceptable for your workflow.
 `simx` is not affiliated with, endorsed by, or sponsored by Apple Inc. Apple,
 iOS, macOS, Xcode, and Simulator-related names are trademarks of Apple Inc.
 
+## Security Notes
+
+`simx` is intended for local development workflows and agent automation. It
+binds to `127.0.0.1` by default.
+
+Do not expose `simx` streaming ports to public networks. Browser streaming is
+unauthenticated in the current version and can expose simulator screen contents,
+typed text, app data, keyboard input, and HID actions.
+
+If you use `--host 0.0.0.0` or any other non-local host, you are responsible for
+network isolation.
+
 ## Implementation Notes
 
 - Pool state lives at `~/Library/Application Support/simx/pool.json`.
