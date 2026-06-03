@@ -32,6 +32,7 @@ Behavior:
 - If `<slug>` owns an expired lease, the expired lease is reclaimed first, then normal leasing runs.
 - If another slug owns an active lease, that simulator is busy.
 - If another slug owns an expired lease, that simulator is reclaimed and can be leased.
+- If another slug owns a non-booted lease with no tracked serve process, that stale lease is reclaimed and can be leased.
 - If the pool is full, wait until `--wait-timeout`, then fail.
 - Allocated simulators are booted if needed.
 
@@ -51,7 +52,7 @@ simx lease --slug agent-a --ttl 10m --json
   "lease_expires_at": 1780239000,
   "ttl_seconds": 600,
   "serve": {
-    "command": "simx lease --slug agent-a --serve --host 127.0.0.1 --port 8080",
+    "command": "simx serve --slug agent-a --host 127.0.0.1 --port 8080",
     "url": "http://127.0.0.1:8080/agent-a",
     "stream": "ws://127.0.0.1:8080/agent-a/stream",
     "stats": "http://127.0.0.1:8080/agent-a/stats"
@@ -130,6 +131,7 @@ simx status
 Behavior:
 
 - Reaps expired leases before printing.
+- Reclaims non-booted unserved leases before printing.
 - Prints each device with owner and expiry. Idle devices show `idle -`.
 - `simx status --json` returns stable machine-readable device, lease, expiry, serve PID, and serve URL fields.
 

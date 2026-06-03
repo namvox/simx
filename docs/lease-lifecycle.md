@@ -72,6 +72,10 @@ Expired leases are reaped before status, lease, renew, and serve decisions.
 Reaping clears the slug ownership and makes the device available for another
 lease.
 
+Non-booted leases with no tracked serve process are also reclaimed before status
+and lease decisions. This keeps agents from getting stuck behind a stale claim
+when CoreSimulator no longer has the leased device booted.
+
 Use `lease` when an agent is allowed to reacquire a simulator after its previous
 lease expired. Use `renew` when expiration should be treated as a hard ownership
 loss.
@@ -136,6 +140,7 @@ Status returns the pool and per-device lease state:
 simx status --json
 ```
 
-Use [agent-api.md](agent-api.md) for the stable machine-readable command
+Use [api-stability.md](api-stability.md) for the stable command and protocol
+surface, [agent-api.md](agent-api.md) for the stable machine-readable command
 surface, and [lease-contract.md](lease-contract.md) for the concise command
 contract.

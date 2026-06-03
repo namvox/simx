@@ -2,6 +2,11 @@
 
 This document describes the JSON text messages a browser client sends over the `simx` stream WebSocket to control the leased simulator.
 
+The core `v0.1.0` control families are stable: touch, keyboard, Home, and
+resume. On the wire these are represented as `type: "touch"`, `type: "key"`,
+`type: "button"` with `button: "home"`, and `type: "resume"`. Additive fields
+and new message types may be added in minor releases.
+
 ## Endpoint
 
 ```text
@@ -11,7 +16,7 @@ ws://<host>:<port>/<slug>/stream
 Example:
 
 ```text
-ws://127.0.0.1:8080/browser/stream
+ws://127.0.0.1:8080/browser-preview/stream
 ```
 
 The same WebSocket is used for both directions:

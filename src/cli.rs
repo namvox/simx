@@ -61,7 +61,7 @@ enum Command {
         port: u16,
         #[arg(long, default_value_t = 0.7)]
         quality: f32,
-        #[arg(long, default_value_t = 120)]
+        #[arg(long, default_value_t = 60)]
         fps: u32,
         #[arg(long, default_value = "5m", value_parser = parse_duration)]
         idle_timeout: Duration,
@@ -83,7 +83,7 @@ enum Command {
         port: u16,
         #[arg(long, default_value_t = 0.7)]
         quality: f32,
-        #[arg(long, default_value_t = 120)]
+        #[arg(long, default_value_t = 60)]
         fps: u32,
         #[arg(long, default_value = "5m", value_parser = parse_duration)]
         idle_timeout: Duration,

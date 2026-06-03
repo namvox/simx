@@ -2,6 +2,10 @@
 
 This is the stable command surface intended for agents.
 
+See [api-stability.md](api-stability.md) for the versioning policy, stable
+command list, JSON compatibility rules, lease semantics, and WebSocket/HID
+stability contract.
+
 ## JSON Output
 
 ```sh
@@ -89,6 +93,8 @@ Current error codes:
 - `lease_not_found`
 - `doctor_failed`
 - `internal`
+
+Agents should pass `--json-errors` whenever they need to parse command failures.
 
 ## Serve Lifecycle
 

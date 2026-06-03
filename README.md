@@ -50,6 +50,13 @@ simx doctor
 simx doctor --json
 ```
 
+## Stability
+
+`simx` uses semantic versioning. The `v0.1.0` stable surface includes the pool,
+lease, serve, release, clean, doctor, run, and install commands, plus JSON output
+for agent-facing commands. See [docs/api-stability.md](docs/api-stability.md)
+for the stable CLI, JSON, lease, streaming, and HID contracts.
+
 ## Install
 
 Install from GitHub with Cargo:
@@ -159,7 +166,7 @@ is omitted and launches by default.
 Streaming serves a browser viewer and WebSocket stream for an active lease:
 
 ```sh
-simx lease --slug browser-preview --ttl 10m --serve --port 8080 --fps 30
+simx lease --slug browser-preview --ttl 10m --serve --port 8080
 ```
 
 Open:
@@ -170,16 +177,17 @@ ws://127.0.0.1:8080/browser-preview/stream
 http://127.0.0.1:8080/browser-preview/stats
 ```
 
-`--fps` is configurable and sets the target frame pacing used by the server.
-Actual source and sent frame rates depend on Simulator behavior, host load,
-encoding cost, and client/network backpressure. Check `/<slug>/stats` for
-current `target_fps`, frame counts, dropped frames, latency, `source_fps`, and
-`sent_fps`.
+The public default is `--fps 60`. `--fps` is configurable and sets the target
+frame pacing used by the server; `--fps 120` remains supported as a
+host-dependent target. Actual source and sent frame rates depend on Simulator
+behavior, host load, encoding cost, and client/network backpressure. Check
+`/<slug>/stats` for current `target_fps`, frame counts, dropped frames, latency,
+`source_fps`, and `sent_fps`.
 
 You can also serve an existing active lease:
 
 ```sh
-simx serve --slug browser-preview --port 8080 --fps 30
+simx serve --slug browser-preview --port 8080
 ```
 
 ## JSON Output For Agents

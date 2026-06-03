@@ -29,6 +29,7 @@ simx clean
 Streaming:
 
 ```sh
+simx lease --slug browser --serve --port 8080 --idle-timeout 5m
 simx lease --slug browser --serve --port 8080 --fps 120 --idle-timeout 5m
 ```
 
@@ -47,8 +48,9 @@ http://127.0.0.1:8080/browser/stats
 - Pool devices are named `simx-pool-001`, `simx-pool-002`, and so on.
 - Lease ownership is keyed by `slug`; the same slug can renew and reuse its active lease.
 - Leases have TTLs. Expired leases are reaped before status, lease, renew, and serve decisions.
-- `raw/MindStone` is tracked as a submodule reference source for SimStream behavior.
+- Non-booted unserved leases are reclaimed before status and lease decisions.
 - Streaming uses CoreSimulator/SimulatorKit private APIs through `native/src/simx_bridge.m`.
+- Streaming defaults to `--fps 60`; `--fps 120` is supported as a host-dependent target.
 - The stream path sends JPEG frames as binary WebSocket messages.
 - Browser input sends JSON text messages for touch, keyboard, resume, and Home.
 - `simx install --slug ... --app ...` installs a `.app` bundle on the active lease, infers `CFBundleIdentifier` from `Info.plist`, and launches it by default.

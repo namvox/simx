@@ -8,3 +8,5 @@
 - HID input contract.
 - App install/run helpers.
 - Doctor/status commands.
+- Stable CLI/JSON contract for agent-facing commands.
+- Default streaming target FPS set to 60, with 120 FPS supported as a host-dependent target.
