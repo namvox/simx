@@ -297,7 +297,7 @@ fn run_with(cli: Cli, state_path: PathBuf) -> anyhow::Result<()> {
             }
         }
         Command::Status { json } => {
-            let state = service.status()?;
+            let state = service.status_with_simctl(&mut simctl)?;
             if json {
                 let output = StatusOutput {
                     size: state.size,

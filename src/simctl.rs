@@ -20,6 +20,7 @@ pub trait Simctl {
     fn latest_iphone_device_type(&self) -> anyhow::Result<DeviceSpec>;
     fn latest_ios_runtime(&self) -> anyhow::Result<RuntimeSpec>;
     fn find_device_by_name(&self, name: &str) -> anyhow::Result<Option<String>>;
+    fn device_state(&self, udid: &str) -> anyhow::Result<Option<String>>;
     fn create_device(
         &mut self,
         name: &str,
@@ -75,6 +76,20 @@ impl Simctl for XcrunSimctl {
             for device in devices {
                 if device.name == name {
                     return Ok(Some(device.udid));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn device_state(&self, udid: &str) -> anyhow::Result<Option<String>> {
+        let list = run_json(["simctl", "list", "devices", "-j"])?;
+        let parsed: DevicesResponse =
+            serde_json::from_str(&list).context("failed to parse simctl devices")?;
+        for devices in parsed.devices.into_values() {
+            for device in devices {
+                if device.udid == udid {
+                    return Ok(device.state);
                 }
             }
         }
@@ -244,4 +259,5 @@ struct DevicesResponse {
 struct DeviceEntry {
     name: String,
     udid: String,
+    state: Option<String>,
 }

@@ -117,6 +117,18 @@ impl PoolService {
         })
     }
 
+    pub fn status_with_simctl<S: Simctl>(&mut self, simctl: &mut S) -> anyhow::Result<PoolState> {
+        self.with_locked_state(|file| {
+            let mut state = read_state(file)?;
+            let mut changed = reap_expired_leases(&mut state, now_unix_seconds()?);
+            changed |= reap_non_booted_unserved_leases(&mut state, simctl)?;
+            if changed {
+                write_state(file, &state)?;
+            }
+            Ok(state)
+        })
+    }
+
     pub fn lease<S: Simctl>(
         &mut self,
         simctl: &mut S,
@@ -128,15 +140,8 @@ impl PoolService {
         let deadline = Instant::now() + options.wait_timeout;
 
         loop {
-            match self.try_lease_once(lease_id, options.ttl)? {
-                LeaseAttempt::Leased(device) => {
-                    if let Err(error) = simctl.boot_if_needed(&device.udid) {
-                        self.clear_lease_if_matches(lease_id, &device.udid)?;
-                        return Err(error)
-                            .with_context(|| format!("failed to boot {}", device.udid));
-                    }
-                    return Ok(device);
-                }
+            match self.try_lease_once(simctl, lease_id, options.ttl)? {
+                LeaseAttempt::Leased(device) => return Ok(device),
                 LeaseAttempt::Full => {
                     let now = Instant::now();
                     if now >= deadline {
@@ -288,11 +293,17 @@ impl PoolService {
         })
     }
 
-    fn try_lease_once(&mut self, lease_id: &str, ttl: Duration) -> anyhow::Result<LeaseAttempt> {
+    fn try_lease_once<S: Simctl>(
+        &mut self,
+        simctl: &mut S,
+        lease_id: &str,
+        ttl: Duration,
+    ) -> anyhow::Result<LeaseAttempt> {
         self.with_locked_state(|file| {
             let mut state = read_state(file)?;
             let now = now_unix_seconds()?;
-            let changed = reap_expired_leases_at(&mut state, now);
+            let mut changed = reap_expired_leases_at(&mut state, now);
+            changed |= reap_non_booted_unserved_leases(&mut state, simctl)?;
             let lease_expires_at = expires_at(now, ttl)?;
             if let Some(device) = state
                 .devices
@@ -301,6 +312,11 @@ impl PoolService {
             {
                 device.lease_expires_at = Some(lease_expires_at);
                 let leased = device.clone();
+                if let Err(error) = simctl.boot_if_needed(&leased.udid) {
+                    clear_device_claim(device);
+                    write_state(file, &state)?;
+                    return Err(error).with_context(|| format!("failed to boot {}", leased.udid));
+                }
                 write_state(file, &state)?;
                 return Ok(LeaseAttempt::Leased(leased));
             }
@@ -313,6 +329,11 @@ impl PoolService {
                 device.lease_id = Some(lease_id.to_string());
                 device.lease_expires_at = Some(lease_expires_at);
                 let leased = device.clone();
+                if let Err(error) = simctl.boot_if_needed(&leased.udid) {
+                    clear_device_claim(device);
+                    write_state(file, &state)?;
+                    return Err(error).with_context(|| format!("failed to boot {}", leased.udid));
+                }
                 write_state(file, &state)?;
                 return Ok(LeaseAttempt::Leased(leased));
             }
@@ -321,27 +342,6 @@ impl PoolService {
                 write_state(file, &state)?;
             }
             Ok(LeaseAttempt::Full)
-        })
-    }
-
-    fn clear_lease_if_matches(&mut self, lease_id: &str, udid: &str) -> anyhow::Result<()> {
-        self.with_locked_state(|file| {
-            let mut state = read_state(file)?;
-            let mut changed = false;
-            for device in &mut state.devices {
-                if device.udid == udid && device.lease_id.as_deref() == Some(lease_id) {
-                    device.lease_id = None;
-                    device.lease_expires_at = None;
-                    device.serve_pid = None;
-                    device.serve_host = None;
-                    device.serve_port = None;
-                    changed = true;
-                }
-            }
-            if changed {
-                write_state(file, &state)?;
-            }
-            Ok(())
         })
     }
 
@@ -380,6 +380,14 @@ impl PoolService {
     }
 }
 
+fn clear_device_claim(device: &mut PoolDevice) {
+    device.lease_id = None;
+    device.lease_expires_at = None;
+    device.serve_pid = None;
+    device.serve_host = None;
+    device.serve_port = None;
+}
+
 enum LeaseAttempt {
     Leased(PoolDevice),
     Full,
@@ -411,15 +419,30 @@ fn reap_expired_leases_at(state: &mut PoolState, now: u64) -> bool {
                 .lease_expires_at
                 .is_some_and(|expires| expires <= now)
         {
-            device.lease_id = None;
-            device.lease_expires_at = None;
-            device.serve_pid = None;
-            device.serve_host = None;
-            device.serve_port = None;
+            clear_device_claim(device);
             changed = true;
         }
     }
     changed
+}
+
+fn reap_non_booted_unserved_leases<S: Simctl>(
+    state: &mut PoolState,
+    simctl: &mut S,
+) -> anyhow::Result<bool> {
+    let mut changed = false;
+    for device in &mut state.devices {
+        if device.lease_id.is_some() && device.serve_pid.is_none() {
+            let Some(simulator_state) = simctl.device_state(&device.udid)? else {
+                continue;
+            };
+            if !simulator_state.eq_ignore_ascii_case("Booted") {
+                clear_device_claim(device);
+                changed = true;
+            }
+        }
+    }
+    Ok(changed)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

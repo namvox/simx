@@ -14,6 +14,7 @@ struct FakeSimctl {
     shutdown: Vec<String>,
     deleted: Vec<String>,
     devices: HashMap<String, String>,
+    states: HashMap<String, String>,
 }
 
 impl FakeSimctl {
@@ -22,6 +23,8 @@ impl FakeSimctl {
         for index in 1..=count {
             fake.devices
                 .insert(format!("simx-pool-{index:03}"), format!("UDID-{index}"));
+            fake.states
+                .insert(format!("UDID-{index}"), "Shutdown".to_string());
         }
         fake
     }
@@ -46,6 +49,10 @@ impl Simctl for FakeSimctl {
         Ok(self.devices.get(name).cloned())
     }
 
+    fn device_state(&self, udid: &str) -> anyhow::Result<Option<String>> {
+        Ok(self.states.get(udid).cloned())
+    }
+
     fn create_device(
         &mut self,
         name: &str,
@@ -59,16 +66,19 @@ impl Simctl for FakeSimctl {
             runtime_id.to_string(),
         ));
         self.devices.insert(name.to_string(), udid.clone());
+        self.states.insert(udid.clone(), "Shutdown".to_string());
         Ok(udid)
     }
 
     fn boot_if_needed(&mut self, udid: &str) -> anyhow::Result<()> {
         self.booted.insert(udid.to_string());
+        self.states.insert(udid.to_string(), "Booted".to_string());
         Ok(())
     }
 
     fn shutdown_if_needed(&mut self, udid: &str) -> anyhow::Result<()> {
         self.shutdown.push(udid.to_string());
+        self.states.insert(udid.to_string(), "Shutdown".to_string());
         Ok(())
     }
 
@@ -225,6 +235,62 @@ fn different_leases_get_different_devices_and_full_pool_times_out() {
 }
 
 #[test]
+fn non_booted_unserved_lease_is_reclaimed_for_different_slug() {
+    let temp = TempDir::new().unwrap();
+    let mut simctl = FakeSimctl::with_pool_devices(1);
+    let mut service = PoolService::new(service_path(&temp));
+    service
+        .init(
+            &mut simctl,
+            PoolConfig {
+                size: 1,
+                device_type: None,
+                runtime: None,
+            },
+        )
+        .unwrap();
+
+    let first = service
+        .lease(&mut simctl, "agent-a", short_lease_options())
+        .unwrap();
+    simctl
+        .states
+        .insert(first.udid.clone(), "Shutdown".to_string());
+
+    let second = service
+        .lease(&mut simctl, "agent-b", short_lease_options())
+        .unwrap();
+
+    assert_eq!(first.udid, second.udid);
+    assert_eq!(second.lease_id.as_deref(), Some("agent-b"));
+}
+
+#[test]
+fn booted_lease_is_not_reclaimed_for_different_slug_before_ttl() {
+    let temp = TempDir::new().unwrap();
+    let mut simctl = FakeSimctl::with_pool_devices(1);
+    let mut service = PoolService::new(service_path(&temp));
+    service
+        .init(
+            &mut simctl,
+            PoolConfig {
+                size: 1,
+                device_type: None,
+                runtime: None,
+            },
+        )
+        .unwrap();
+
+    service
+        .lease(&mut simctl, "agent-a", short_lease_options())
+        .unwrap();
+
+    let blocked = service.lease(&mut simctl, "agent-b", short_lease_options());
+
+    assert!(blocked.is_err());
+}
+
+#[test]
 fn expired_lease_is_reclaimed_for_different_slug() {
     let temp = TempDir::new().unwrap();
     let mut simctl = FakeSimctl::with_pool_devices(1);
@@ -376,6 +442,9 @@ fn concurrent_leases_cannot_claim_the_same_device() {
     let second_path = state_path;
     let first = thread::spawn(move || {
         let mut simctl = FakeSimctl::with_pool_devices(1);
+        simctl
+            .states
+            .insert("UDID-1".to_string(), "Booted".to_string());
         PoolService::new(first_path).lease(
             &mut simctl,
             "agent-a",
@@ -387,6 +456,9 @@ fn concurrent_leases_cannot_claim_the_same_device() {
     });
     let second = thread::spawn(move || {
         let mut simctl = FakeSimctl::with_pool_devices(1);
+        simctl
+            .states
+            .insert("UDID-1".to_string(), "Booted".to_string());
         PoolService::new(second_path).lease(
             &mut simctl,
             "agent-b",
