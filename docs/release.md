@@ -8,13 +8,13 @@ Cargo.
 Source install:
 
 ```sh
-cargo install --git https://github.com/boncasa/simx.git
+cargo install --git https://github.com/namvox/simx.git
 ```
 
 Release binary install:
 
 ```sh
-curl -fsSL https://github.com/boncasa/simx/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/namvox/simx/releases/latest/download/install.sh | sh
 ```
 
 `v0.1.0` release binaries are Apple Silicon first. Homebrew support is not

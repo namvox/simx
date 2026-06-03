@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.1.1 - 2026-06-03
+
+- Update public install URLs and release installer to `namvox/simx`.
+
 ## v0.1.0 - 2026-06-03
 
 - Simulator pool lifecycle.

@@ -68,7 +68,7 @@ for the stable CLI, JSON, lease, streaming, and HID contracts.
 Install from GitHub with Cargo:
 
 ```sh
-cargo install --git https://github.com/boncasa/simx.git
+cargo install --git https://github.com/namvox/simx.git
 ```
 
 Install from a local checkout:
@@ -80,12 +80,11 @@ cargo install --path .
 Install from GitHub Releases with curl:
 
 ```sh
-curl -fsSL https://github.com/boncasa/simx/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/namvox/simx/releases/latest/download/install.sh | sh
 ```
 
-GitHub Releases need to be set up before the curl installer works. The release
-should publish an `install.sh` asset and any binaries that script downloads.
-See [docs/release.md](docs/release.md) for the release process.
+GitHub Releases provide the Apple Silicon binary and install script. See
+[docs/release.md](docs/release.md) for the release process.
 
 ## Pool Lifecycle
 

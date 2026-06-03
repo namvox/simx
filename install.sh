@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo="boncasa/simx"
+repo="namvox/simx"
 asset="simx-aarch64-apple-darwin.tar.gz"
 base_url="https://github.com/${repo}/releases/latest/download"
 
