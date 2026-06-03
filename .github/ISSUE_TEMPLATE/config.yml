@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/namvox/simx/security/policy
+    about: Please report security issues using the security policy instead of a public issue.
+  - name: API and CLI stability
+    url: https://github.com/namvox/simx/blob/main/docs/api-stability.md
+    about: Read the stable command, JSON, lease, streaming, and HID contract.
