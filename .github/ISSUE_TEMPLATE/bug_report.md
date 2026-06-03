@@ -1,9 +1,10 @@
 ---
 name: Bug report
 about: Report a reproducible simx problem
-title: "bug: "
+title: 'bug: '
 labels: bug
-assignees: ""
+assignees: ''
+
 ---
 
 ## Summary

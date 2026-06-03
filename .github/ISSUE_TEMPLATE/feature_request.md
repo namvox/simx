@@ -1,9 +1,10 @@
 ---
 name: Feature request
 about: Suggest a simx improvement
-title: "feature: "
+title: 'feature: '
 labels: enhancement
-assignees: ""
+assignees: ''
+
 ---
 
 ## Use Case
@@ -36,4 +37,3 @@ assignees: ""
 - [ ] Requires a new release asset or installer change
 
 ## Additional Context
-
