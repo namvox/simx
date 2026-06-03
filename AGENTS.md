@@ -61,6 +61,14 @@ http://127.0.0.1:8080/browser/stats
 
 - Keep the CLI namespace flat: use `simx lease --slug ... --serve`, not `simx pool` or `simx simstream`.
 - Prefer focused tests for pool state transitions and WebSocket protocol behavior.
+- For every pull request, follow `.github/PULL_REQUEST_TEMPLATE.md`. The PR body should explicitly cover Summary, Type, Stable Contract Impact, Verification, Simulator And Streaming Notes, Screenshots Or Demo, and Release Notes.
+- Stable CLI, JSON, WebSocket, and HID changes must reference `docs/api-stability.md` and update the relevant docs in the same PR.
+- Verification should match the change:
+  - Documentation/template-only changes may say no Rust checks were required.
+  - Code changes should run `cargo fmt --check`, `cargo test`, and `cargo clippy -- -D warnings`, or `make check`.
+  - Release/install changes should also run `make release-dry-run` or explain why it does not apply.
+  - Simulator/streaming changes should include `simx doctor --json` and the manual browser checks below when feasible.
+- Release Notes in the PR must say whether `CHANGELOG.md` was updated. If not, explain why the change does not need a changelog entry.
 - Before claiming streaming works, manually verify:
   - `cargo test` passes.
   - `simx doctor --json` passes.
