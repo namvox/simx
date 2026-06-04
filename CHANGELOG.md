@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Add `simx update` to check for and install GitHub Release binaries.
+- Add cached latest-version hints so older clients encourage agents to run `simx update`.
+
 ## v0.1.2 - 2026-06-03
 
 - Add HID long-press scroll input for upward, downward, leftward, and rightward scroll gestures.

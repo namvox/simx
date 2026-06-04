@@ -86,6 +86,23 @@ curl -fsSL https://github.com/namvox/simx/releases/latest/download/install.sh | 
 GitHub Releases provide the Apple Silicon binary and install script. See
 [docs/release.md](docs/release.md) for the release process.
 
+Check for or install the latest release binary:
+
+```sh
+simx update --check
+simx update
+```
+
+When a newer release is known, normal human-readable commands print a stderr
+hint such as:
+
+```text
+simx 0.1.1 is available; current version is 0.1.0. Run `simx update` to upgrade.
+```
+
+The check is cached for 24 hours and can be disabled with `--no-update-check`
+for CI or hermetic agent runs.
+
 ## Pool Lifecycle
 
 Initialize a stable simulator pool:
@@ -219,6 +236,12 @@ simx lease --slug checkout-tests --ttl 10m --json
     "url": "http://127.0.0.1:8080/checkout-tests",
     "stream": "ws://127.0.0.1:8080/checkout-tests/stream",
     "stats": "http://127.0.0.1:8080/checkout-tests/stats"
+  },
+  "update": {
+    "available": true,
+    "current_version": "0.1.0",
+    "latest_version": "0.1.1",
+    "command": "simx update"
   }
 }
 ```

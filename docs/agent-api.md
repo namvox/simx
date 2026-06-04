@@ -15,6 +15,7 @@ simx install --slug agent-a --app path/to/App.app --json
 simx run --slug agent-a --json
 simx status --json
 simx doctor --json
+simx update --check --json
 ```
 
 Lease and renew return:
@@ -58,6 +59,35 @@ Run returns:
 - `app`
 - `bundle_id`
 - `launched`
+
+Update returns:
+
+- `ok`
+- `current_version`
+- `latest_version`
+- `update_available`
+- `installed`
+- `installed_version`
+- `install_path`
+- `asset`
+- `checksum_verified`
+
+When a newer release is known, JSON outputs may include an additive `update`
+object:
+
+```json
+{
+  "update": {
+    "available": true,
+    "current_version": "0.1.0",
+    "latest_version": "0.1.1",
+    "command": "simx update"
+  }
+}
+```
+
+Agents that need fully hermetic command output can pass the global
+`--no-update-check` flag.
 
 ## JSON Errors
 
@@ -157,3 +187,19 @@ Checks:
 - SimulatorKit private framework path
 - `xcrun simctl list runtimes -j`
 - state directory resolvability
+
+## Update
+
+```sh
+simx update --check
+simx update
+simx update --version v0.1.1
+simx update --install-dir ~/.local/bin
+simx update --json
+```
+
+`simx update` checks GitHub Releases and installs the Apple Silicon release
+binary. `--check` reports whether a newer release is available without
+installing it. `--version` installs a specific release tag, which also supports
+rollback. If `--install-dir` is omitted, `simx update` replaces the currently
+running binary when its directory is writable.

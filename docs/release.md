@@ -17,6 +17,13 @@ Release binary install:
 curl -fsSL https://github.com/namvox/simx/releases/latest/download/install.sh | sh
 ```
 
+Release binary update:
+
+```sh
+simx update --check
+simx update
+```
+
 `v0.1.0` release binaries are Apple Silicon first. Homebrew support is not
 documented until it exists.
 
@@ -59,6 +66,10 @@ simx-aarch64-apple-darwin.tar.gz
 checksums.txt
 install.sh
 ```
+
+`simx update` expects the release archive and `checksums.txt` names above. If
+the artifact names change, update the command implementation and
+[docs/api-stability.md](api-stability.md) in the same PR.
 
 ## Demo
 

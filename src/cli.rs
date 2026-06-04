@@ -11,6 +11,7 @@ use serde::Serialize;
 use crate::pool::{LeaseOptions, PoolConfig, PoolDevice, PoolService};
 use crate::simctl::{Simctl, XcrunSimctl};
 use crate::stream::{serve, ServeConfig, StreamStats};
+use crate::update::{self, UpdateHint, UpdateOptions};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -22,6 +23,9 @@ struct Cli {
     /// Print CLI errors as stable JSON.
     #[arg(long, global = true)]
     json_errors: bool,
+    /// Skip the cached GitHub release check used for update hints.
+    #[arg(long, global = true)]
+    no_update_check: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -119,6 +123,17 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Check for or install the latest simx release binary.
+    Update {
+        #[arg(long)]
+        check: bool,
+        #[arg(long)]
+        version: Option<String>,
+        #[arg(long)]
+        install_dir: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Extend an active simulator lease.
     Renew {
         #[arg(long)]
@@ -146,6 +161,8 @@ struct LeaseOutput<'a> {
     lease_expires_at_rfc3339: Option<String>,
     ttl_seconds: u64,
     serve: ServeOutput,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    update: Option<UpdateHint>,
 }
 
 #[derive(Debug, Serialize)]
@@ -162,6 +179,8 @@ struct StatusOutput {
     device_type: String,
     runtime: String,
     devices: Vec<StatusDeviceOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    update: Option<UpdateHint>,
 }
 
 #[derive(Debug, Serialize)]
@@ -188,6 +207,8 @@ struct RunOutput<'a> {
     app: String,
     bundle_id: String,
     launched: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    update: Option<UpdateHint>,
 }
 
 #[derive(Debug, Serialize)]
@@ -197,6 +218,8 @@ struct InstallOutput<'a> {
     app: String,
     bundle_id: String,
     launched: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    update: Option<UpdateHint>,
 }
 
 #[derive(Debug, Serialize)]
@@ -210,6 +233,8 @@ struct ErrorOutput<'a> {
 struct DoctorOutput {
     ok: bool,
     checks: Vec<DoctorCheck>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    update: Option<UpdateHint>,
 }
 
 #[derive(Debug, Serialize)]
@@ -273,6 +298,15 @@ pub fn run() -> anyhow::Result<()> {
 }
 
 fn run_with(cli: Cli, state_path: PathBuf) -> anyhow::Result<()> {
+    let update_hint = if cli.no_update_check || matches!(&cli.command, Command::Update { .. }) {
+        None
+    } else {
+        update::maybe_update_hint()
+    };
+    if let Some(hint) = &update_hint {
+        update::print_update_hint(hint);
+    }
+
     let mut service = PoolService::new(state_path.clone());
     let mut simctl = XcrunSimctl;
 
@@ -302,6 +336,7 @@ fn run_with(cli: Cli, state_path: PathBuf) -> anyhow::Result<()> {
                     size: state.size,
                     device_type: state.device_type_id,
                     runtime: state.runtime_id,
+                    update: update_hint,
                     devices: state
                         .devices
                         .into_iter()
@@ -359,7 +394,7 @@ fn run_with(cli: Cli, state_path: PathBuf) -> anyhow::Result<()> {
             new: _new,
         } => {
             let device = service.lease(&mut simctl, &slug, LeaseOptions { wait_timeout, ttl })?;
-            print_lease(&slug, &device, ttl, &host, port, json)?;
+            print_lease(&slug, &device, ttl, &host, port, json, update_hint.clone())?;
             if should_serve {
                 run_serve(
                     &mut service,
@@ -423,6 +458,7 @@ fn run_with(cli: Cli, state_path: PathBuf) -> anyhow::Result<()> {
                 bundle_id,
                 launch: !no_launch,
                 json,
+                update: update_hint,
             })?;
         }
         Command::Install {
@@ -436,7 +472,49 @@ fn run_with(cli: Cli, state_path: PathBuf) -> anyhow::Result<()> {
             simctl
                 .boot_if_needed(&device.udid)
                 .with_context(|| format!("failed to boot {}", device.udid))?;
-            install_app_command(&slug, &device.udid, &app, bundle_id, !no_launch, json)?;
+            install_app_command(
+                &slug,
+                &device.udid,
+                &app,
+                bundle_id,
+                !no_launch,
+                json,
+                update_hint,
+            )?;
+        }
+        Command::Update {
+            check,
+            version,
+            install_dir,
+            json,
+        } => {
+            let output = update::run_update(UpdateOptions {
+                check,
+                version,
+                install_dir,
+            })?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else if output.installed {
+                let installed_version = output
+                    .installed_version
+                    .as_deref()
+                    .unwrap_or(&output.latest_version);
+                println!(
+                    "updated simx {} -> {}",
+                    output.current_version, installed_version
+                );
+                if let Some(path) = output.install_path {
+                    println!("installed {path}");
+                }
+            } else if output.update_available {
+                println!(
+                    "simx {} is available; current version is {}. Run `simx update` to upgrade.",
+                    output.latest_version, output.current_version
+                );
+            } else {
+                println!("simx {} is already current", output.current_version);
+            }
         }
         Command::Release { slug } => {
             let released = service.release(&slug)?;
@@ -451,7 +529,7 @@ fn run_with(cli: Cli, state_path: PathBuf) -> anyhow::Result<()> {
         }
         Command::Renew { slug, ttl, json } => {
             let device = service.renew(&slug, ttl)?;
-            print_lease(&slug, &device, ttl, "127.0.0.1", 8080, json)?;
+            print_lease(&slug, &device, ttl, "127.0.0.1", 8080, json, update_hint)?;
         }
         Command::Clean => {
             let state = service.status().ok();
@@ -469,7 +547,7 @@ fn run_with(cli: Cli, state_path: PathBuf) -> anyhow::Result<()> {
             }
         }
         Command::Doctor { json } => {
-            let output = doctor(default_state_path()?.as_path());
+            let output = doctor(default_state_path()?.as_path(), update_hint);
             if json {
                 println!("{}", serde_json::to_string_pretty(&output)?);
             } else {
@@ -556,6 +634,7 @@ struct RunAppCommand {
     bundle_id: Option<String>,
     launch: bool,
     json: bool,
+    update: Option<UpdateHint>,
 }
 
 fn run_xcode_app(command: RunAppCommand) -> anyhow::Result<()> {
@@ -603,6 +682,7 @@ fn run_xcode_app(command: RunAppCommand) -> anyhow::Result<()> {
             app: app.display().to_string(),
             bundle_id,
             launched: command.launch,
+            update: command.update,
         };
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
@@ -624,6 +704,7 @@ fn install_app_command(
     bundle_id: Option<String>,
     launch: bool,
     json: bool,
+    update: Option<UpdateHint>,
 ) -> anyhow::Result<()> {
     let bundle_id = install_app(udid, app, bundle_id, launch)?;
     if json {
@@ -633,6 +714,7 @@ fn install_app_command(
             app: app.display().to_string(),
             bundle_id,
             launched: launch,
+            update,
         };
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
@@ -981,6 +1063,7 @@ fn print_lease(
     host: &str,
     port: u16,
     json: bool,
+    update: Option<UpdateHint>,
 ) -> anyhow::Result<()> {
     if json {
         let output = LeaseOutput {
@@ -996,6 +1079,7 @@ fn print_lease(
                 stream: format!("ws://{host}:{port}/{slug}/stream"),
                 stats: format!("http://{host}:{port}/{slug}/stats"),
             },
+            update,
         };
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
@@ -1062,7 +1146,7 @@ fn exit_code(error: &anyhow::Error) -> i32 {
     }
 }
 
-fn doctor(state_path: &Path) -> DoctorOutput {
+fn doctor(state_path: &Path, update: Option<UpdateHint>) -> DoctorOutput {
     let mut checks = Vec::new();
     checks.push(command_check(
         "xcode-select",
@@ -1105,6 +1189,7 @@ fn doctor(state_path: &Path) -> DoctorOutput {
     DoctorOutput {
         ok: checks.iter().all(|check| check.ok),
         checks,
+        update,
     }
 }
 
