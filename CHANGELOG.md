@@ -1,9 +1,13 @@
 # Changelog
 
+## v0.1.2 - 2026-06-03
+
+- Add HID long-press scroll input for upward, downward, leftward, and rightward scroll gestures.
+- Fix browser viewer swipes so pointer movement sends continuous HID touch move events and missed releases cancel cleanly.
+
 ## v0.1.1 - 2026-06-03
 
 - Update public install URLs and release installer to `namvox/simx`.
-- Add HID long-press scroll input for upward, downward, leftward, and rightward scroll gestures.
 
 ## v0.1.0 - 2026-06-03
 
