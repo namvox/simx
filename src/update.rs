@@ -64,7 +64,7 @@ pub fn run_update(options: UpdateOptions) -> Result<UpdateOutput> {
     validate_release_platform()?;
     let requested_version = options.version.is_some();
     let latest_version = match options.version {
-        Some(version) => normalize_version_tag(&version),
+        Some(version) => validate_version_tag(&version)?,
         None => fetch_latest_version(Duration::from_secs(15))?,
     };
     if !requested_version {
@@ -196,6 +196,13 @@ fn normalize_version_tag(value: &str) -> String {
     value.trim().trim_start_matches('v').to_string()
 }
 
+fn validate_version_tag(value: &str) -> Result<String> {
+    let normalized = normalize_version_tag(value);
+    Version::parse(&normalized)
+        .with_context(|| format!("release version must be a semver tag like v0.1.2: {value}"))?;
+    Ok(normalized)
+}
+
 fn is_newer_version(latest: &str, current: &str) -> bool {
     let Ok(latest) = Version::parse(&normalize_version_tag(latest)) else {
         return false;
@@ -263,9 +270,9 @@ fn ensure_writable_dir(path: &Path) -> Result<()> {
 }
 
 fn install_release(version: &str, install_path: &Path) -> Result<bool> {
-    let temp_dir = make_temp_dir()?;
-    let asset_path = temp_dir.join(ASSET);
-    let checksum_path = temp_dir.join("checksums.txt");
+    let temp_dir = TempDirGuard::new()?;
+    let asset_path = temp_dir.path().join(ASSET);
+    let checksum_path = temp_dir.path().join("checksums.txt");
     let tag = format!("v{}", normalize_version_tag(version));
     let base_url = format!("https://github.com/{REPO}/releases/download/{tag}");
 
@@ -286,8 +293,8 @@ fn install_release(version: &str, install_path: &Path) -> Result<bool> {
         Err(_) => false,
     };
 
-    extract_archive(&asset_path, &temp_dir)?;
-    let extracted = temp_dir.join("simx");
+    extract_archive(&asset_path, temp_dir.path())?;
+    let extracted = temp_dir.path().join("simx");
     if !extracted.exists() {
         anyhow::bail!("release archive did not contain a simx binary");
     }
@@ -297,27 +304,39 @@ fn install_release(version: &str, install_path: &Path) -> Result<bool> {
     }
     let extracted_version = binary_version(&extracted)?;
     if extracted_version != normalize_version_tag(version) {
-        fs::remove_dir_all(temp_dir).ok();
         anyhow::bail!(
             "release archive version mismatch: requested {}, but bundled simx reports {}",
             normalize_version_tag(version),
             extracted_version
         );
     }
-    fs::copy(&extracted, install_path)
-        .with_context(|| format!("failed to install simx to {}", install_path.display()))?;
-    let mut permissions = fs::metadata(install_path)
-        .with_context(|| format!("failed to inspect {}", install_path.display()))?
+    install_binary_atomically(&extracted, install_path)?;
+    Ok(checksum_verified)
+}
+
+fn install_binary_atomically(extracted: &Path, install_path: &Path) -> Result<()> {
+    let install_dir = install_path
+        .parent()
+        .context("install path has no parent directory")?;
+    let staged = install_dir.join(format!(".simx-update-{}", std::process::id()));
+    fs::copy(extracted, &staged)
+        .with_context(|| format!("failed to stage simx at {}", staged.display()))?;
+    let mut permissions = fs::metadata(&staged)
+        .with_context(|| format!("failed to inspect {}", staged.display()))?
         .permissions();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         permissions.set_mode(0o755);
-        fs::set_permissions(install_path, permissions)
-            .with_context(|| format!("failed to chmod {}", install_path.display()))?;
+        fs::set_permissions(&staged, permissions)
+            .with_context(|| format!("failed to chmod {}", staged.display()))?;
     }
-    fs::remove_dir_all(temp_dir).ok();
-    Ok(checksum_verified)
+    if let Err(error) = fs::rename(&staged, install_path) {
+        fs::remove_file(&staged).ok();
+        return Err(error)
+            .with_context(|| format!("failed to install simx to {}", install_path.display()));
+    }
+    Ok(())
 }
 
 fn binary_version(path: &Path) -> Result<String> {
@@ -339,14 +358,30 @@ fn binary_version(path: &Path) -> Result<String> {
         .context("could not parse simx --version output")
 }
 
-fn make_temp_dir() -> Result<PathBuf> {
-    let path = std::env::temp_dir().join(format!(
-        "simx-update-{}-{}",
-        std::process::id(),
-        now_unix_seconds()?
-    ));
-    fs::create_dir(&path).with_context(|| format!("failed to create {}", path.display()))?;
-    Ok(path)
+struct TempDirGuard {
+    path: PathBuf,
+}
+
+impl TempDirGuard {
+    fn new() -> Result<Self> {
+        let path = std::env::temp_dir().join(format!(
+            "simx-update-{}-{}",
+            std::process::id(),
+            now_unix_seconds()?
+        ));
+        fs::create_dir(&path).with_context(|| format!("failed to create {}", path.display()))?;
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        fs::remove_dir_all(&self.path).ok();
+    }
 }
 
 fn download(url: &str, output_path: &Path, timeout: Duration) -> Result<()> {
@@ -468,5 +503,11 @@ mod tests {
     fn version_tag_normalization_removes_prefix() {
         assert_eq!(normalize_version_tag("v0.2.0"), "0.2.0");
         assert_eq!(normalize_version_tag("0.2.0"), "0.2.0");
+    }
+
+    #[test]
+    fn version_tag_validation_rejects_non_semver_values() {
+        assert_eq!(validate_version_tag("v0.2.0").unwrap(), "0.2.0");
+        assert!(validate_version_tag("latest").is_err());
     }
 }

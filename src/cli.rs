@@ -1130,6 +1130,7 @@ fn error_code(error: &anyhow::Error) -> &'static str {
         || message.contains("xcodebuild failed")
         || message.contains("could not infer bundle id")
         || message.contains("path is not valid UTF-8")
+        || message.contains("release version must")
     {
         "invalid_argument"
     } else {
