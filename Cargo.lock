@@ -518,6 +518,7 @@ dependencies = [
  "directories",
  "fs2",
  "humantime",
+ "semver",
  "serde",
  "serde_json",
  "sha1",

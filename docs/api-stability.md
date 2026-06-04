@@ -26,6 +26,7 @@ simx clean
 simx doctor
 simx run
 simx install
+simx update
 ```
 
 Human-readable text output may change. Agents should use JSON output where
@@ -42,6 +43,7 @@ simx renew --json
 simx doctor --json
 simx run --json
 simx install --json
+simx update --json
 simx --json-errors ...
 ```
 
@@ -49,6 +51,24 @@ Existing JSON fields will not be removed or renamed without a major release. New
 fields may be added in minor releases, so agents should ignore unknown fields.
 
 Agents should pass `--json-errors` when parsing failures.
+
+When a newer release is known, agent-facing JSON commands may include an
+additive `update` object:
+
+```json
+{
+  "update": {
+    "available": true,
+    "current_version": "0.1.0",
+    "latest_version": "0.1.1",
+    "command": "simx update"
+  }
+}
+```
+
+Human-readable commands may print the same update hint to stderr. The passive
+release check is cached and can be disabled with the global
+`--no-update-check` flag.
 
 ## Lease Semantics
 

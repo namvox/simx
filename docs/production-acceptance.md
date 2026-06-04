@@ -9,6 +9,8 @@ This milestone is complete only when all checks below pass.
 - `simx install --slug <slug> --app <path-to.app> --json` installs and launches an app on the active lease.
 - `simx run --slug <slug> --json` validates the current Xcode project, builds it quietly, returns a build log path, installs the app, writes `.simx/run.json`, and launches it on the active lease.
 - `simx status --json` returns pool and per-device lease/serve state.
+- `simx update --check --json` reports current/latest version and whether an update is available.
+- Agent-facing JSON may include an additive `update` hint when a newer release is known.
 - `--json-errors` returns `{ ok, code, message }` for runtime and argument errors.
 - Exit codes match `docs/agent-api.md`.
 
@@ -66,6 +68,7 @@ This milestone is complete only when all checks below pass.
 - GitHub Actions runs Linux and macOS checks.
 - Tagged releases build and upload the Apple Silicon `simx-aarch64-apple-darwin.tar.gz` artifact.
 - `install.sh` installs the latest Apple Silicon release binary into an auto-detected writable bin directory.
+- `simx update` verifies `checksums.txt` when available and installs the latest release binary.
 
 ## Manual Smoke
 
