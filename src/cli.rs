@@ -5,12 +5,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 
 use crate::pool::{LeaseOptions, PoolConfig, PoolDevice, PoolService};
 use crate::simctl::{Simctl, XcrunSimctl};
-use crate::stream::{serve, ServeConfig, StreamStats};
+use crate::stream::{serve, ServeConfig, StreamStats, StreamTransport};
 use crate::update::{self, UpdateHint, UpdateOptions};
 
 #[derive(Debug, Parser)]
@@ -66,6 +66,8 @@ enum Command {
         quality: f32,
         #[arg(long, default_value_t = 60)]
         fps: u32,
+        #[arg(long, value_enum, default_value = "jpeg")]
+        transport: CliTransport,
         #[arg(long, default_value = "5m", value_parser = parse_duration)]
         idle_timeout: Duration,
         #[arg(long)]
@@ -88,6 +90,8 @@ enum Command {
         quality: f32,
         #[arg(long, default_value_t = 60)]
         fps: u32,
+        #[arg(long, value_enum, default_value = "jpeg")]
+        transport: CliTransport,
         #[arg(long, default_value = "5m", value_parser = parse_duration)]
         idle_timeout: Duration,
     },
@@ -170,7 +174,33 @@ struct ServeOutput {
     command: String,
     url: String,
     stream: String,
+    h264_url: String,
+    h264_stream: String,
     stats: String,
+}
+
+struct LeasePrintOptions<'a> {
+    ttl: Duration,
+    host: &'a str,
+    port: u16,
+    transport: CliTransport,
+    json: bool,
+    update: Option<UpdateHint>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CliTransport {
+    Jpeg,
+    H264,
+}
+
+impl From<CliTransport> for StreamTransport {
+    fn from(value: CliTransport) -> Self {
+        match value {
+            CliTransport::Jpeg => Self::Jpeg,
+            CliTransport::H264 => Self::H264,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -390,11 +420,23 @@ fn run_with(cli: Cli, state_path: PathBuf) -> anyhow::Result<()> {
             port,
             quality,
             fps,
+            transport,
             idle_timeout,
             new: _new,
         } => {
             let device = service.lease(&mut simctl, &slug, LeaseOptions { wait_timeout, ttl })?;
-            print_lease(&slug, &device, ttl, &host, port, json, update_hint.clone())?;
+            print_lease(
+                &slug,
+                &device,
+                LeasePrintOptions {
+                    ttl,
+                    host: &host,
+                    port,
+                    transport,
+                    json,
+                    update: update_hint.clone(),
+                },
+            )?;
             if should_serve {
                 run_serve(
                     &mut service,
@@ -404,6 +446,7 @@ fn run_with(cli: Cli, state_path: PathBuf) -> anyhow::Result<()> {
                         port,
                         quality,
                         fps,
+                        transport: transport.into(),
                         idle_timeout,
                         udid: device.udid,
                     },
@@ -417,6 +460,7 @@ fn run_with(cli: Cli, state_path: PathBuf) -> anyhow::Result<()> {
             port,
             quality,
             fps,
+            transport,
             idle_timeout,
         } => {
             let device = service.active_lease(&slug)?;
@@ -428,6 +472,7 @@ fn run_with(cli: Cli, state_path: PathBuf) -> anyhow::Result<()> {
                     port,
                     quality,
                     fps,
+                    transport: transport.into(),
                     idle_timeout,
                     udid: device.udid,
                 },
@@ -529,7 +574,18 @@ fn run_with(cli: Cli, state_path: PathBuf) -> anyhow::Result<()> {
         }
         Command::Renew { slug, ttl, json } => {
             let device = service.renew(&slug, ttl)?;
-            print_lease(&slug, &device, ttl, "127.0.0.1", 8080, json, update_hint)?;
+            print_lease(
+                &slug,
+                &device,
+                LeasePrintOptions {
+                    ttl,
+                    host: "127.0.0.1",
+                    port: 8080,
+                    transport: CliTransport::Jpeg,
+                    json,
+                    update: update_hint,
+                },
+            )?;
         }
         Command::Clean => {
             let state = service.status().ok();
@@ -575,6 +631,7 @@ struct ServeCommand {
     port: u16,
     quality: f32,
     fps: u32,
+    transport: StreamTransport,
     idle_timeout: Duration,
     udid: String,
 }
@@ -598,6 +655,7 @@ fn run_serve(
         port: command.port,
         quality: command.quality,
         fps: command.fps,
+        transport: command.transport,
         idle_timeout: command.idle_timeout,
         slug: command.slug.clone(),
         udid: command.udid,
@@ -1059,12 +1117,20 @@ fn path_as_str(path: &Path) -> anyhow::Result<&str> {
 fn print_lease(
     slug: &str,
     device: &PoolDevice,
-    ttl: Duration,
-    host: &str,
-    port: u16,
-    json: bool,
-    update: Option<UpdateHint>,
+    options: LeasePrintOptions<'_>,
 ) -> anyhow::Result<()> {
+    let LeasePrintOptions {
+        ttl,
+        host,
+        port,
+        transport,
+        json,
+        update,
+    } = options;
+    let transport_arg = match transport {
+        CliTransport::Jpeg => String::new(),
+        CliTransport::H264 => " --transport h264".to_string(),
+    };
     if json {
         let output = LeaseOutput {
             slug,
@@ -1074,9 +1140,16 @@ fn print_lease(
             lease_expires_at_rfc3339: device.lease_expires_at.map(format_unix_timestamp),
             ttl_seconds: ttl.as_secs(),
             serve: ServeOutput {
-                command: format!("simx serve --slug {slug} --host {host} --port {port}"),
-                url: format!("http://{host}:{port}/{slug}"),
+                command: format!(
+                    "simx serve --slug {slug} --host {host} --port {port}{transport_arg}"
+                ),
+                url: match transport {
+                    CliTransport::Jpeg => format!("http://{host}:{port}/{slug}"),
+                    CliTransport::H264 => format!("http://{host}:{port}/{slug}?transport=h264"),
+                },
                 stream: format!("ws://{host}:{port}/{slug}/stream"),
+                h264_url: format!("http://{host}:{port}/{slug}?transport=h264"),
+                h264_stream: format!("ws://{host}:{port}/{slug}/h264-stream"),
                 stats: format!("http://{host}:{port}/{slug}/stats"),
             },
             update,
@@ -1087,7 +1160,10 @@ fn print_lease(
         if let Some(expires_at) = device.lease_expires_at {
             println!("lease expires at {}", format_unix_timestamp(expires_at));
         }
-        println!("serve with: simx serve --slug {slug} --host {host} --port {port}");
+        println!("serve with: simx serve --slug {slug} --host {host} --port {port}{transport_arg}");
+        if transport == CliTransport::H264 {
+            println!("viewer: http://{host}:{port}/{slug}?transport=h264");
+        }
     }
     Ok(())
 }

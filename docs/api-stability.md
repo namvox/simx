@@ -110,6 +110,7 @@ Default streaming options:
 --port 8080
 --quality 0.7
 --fps 60
+--transport jpeg
 --idle-timeout 5m
 ```
 
@@ -124,6 +125,20 @@ GET /<slug>
 GET /<slug>/stats
 WS  /<slug>/stream
 ```
+
+Experimental route shape:
+
+```text
+GET /<slug>?transport=h264
+WS  /<slug>/h264-stream
+```
+
+The `--transport h264` serve option and H.264 route are active development
+transport surfaces for VideoToolbox/WebCodecs validation. Their message envelope,
+viewer behavior, and JSON discovery fields may change before they are promoted
+to a stable contract. The current measured 60 fps browser success profile uses
+`--transport h264 --fps 70` and a 640 px encoded-width cap; this is an
+experimental tuning detail, not a stable API guarantee.
 
 Stable transport:
 

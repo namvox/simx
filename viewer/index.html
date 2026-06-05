@@ -11,7 +11,8 @@
     .phone { width: min(390px, 90vw); padding: 10px; border-radius: 44px; background: linear-gradient(135deg, #c97832, #f2b36d 45%, #7d421f); box-shadow: 0 28px 80px #0009; }
     .screen { position: relative; overflow: hidden; border-radius: 34px; background: #050608; aspect-ratio: 1170 / 2532; outline: none; touch-action: none; }
     .screen:focus { box-shadow: 0 0 0 3px #f2b36d; }
-    img { display: block; width: 100%; height: 100%; object-fit: contain; -webkit-user-drag: none; user-select: none; }
+    img, canvas { display: block; width: 100%; height: 100%; object-fit: contain; -webkit-user-drag: none; user-select: none; }
+    [hidden] { display: none !important; }
     .status { font-size: 13px; color: #b9c0cc; }
     button { appearance: none; border: 0; border-radius: 999px; padding: 9px 14px; background: #f2b36d; color: #15110c; font-weight: 700; }
     button[hidden] { display: none; }
@@ -22,32 +23,216 @@
     <div class="phone">
       <div id="screen" class="screen" tabindex="0">
         <img id="frame" alt="Simulator stream">
+        <canvas id="video" hidden></canvas>
       </div>
     </div>
     <div id="status" class="status">Connecting...</div>
+    <pre id="metrics" hidden>{}</pre>
     <button id="resume" hidden>Resume</button>
   </main>
   <script>
     const statusEl = document.getElementById("status");
     const frameEl = document.getElementById("frame");
+    const videoEl = document.getElementById("video");
     const screenEl = document.getElementById("screen");
     const resumeEl = document.getElementById("resume");
+    const metricsEl = document.getElementById("metrics");
+    const params = new URLSearchParams(location.search);
+    const defaultTransport = "__SIMX_TRANSPORT__";
+    const transport = params.get("transport") === "h264" || (!params.has("transport") && defaultTransport === "h264") ? "h264" : "jpeg";
+    const videoContext = videoEl.getContext("2d", { alpha: false });
     let socket;
     let objectUrl;
     let paused = false;
     let activePointerId = null;
     let lastPoint = null;
     let activeTouchTimer = null;
+    let decoder;
+    let awaitingKeyframe = true;
+    const metrics = {
+      transport,
+      openedAt: performance.now(),
+      configuredAt: null,
+      firstFrameAt: null,
+      lastFrameAt: null,
+      decodedFrames: 0,
+      renderedFrames: 0,
+      droppedMetadata: 0,
+      totalBinaryBytes: 0,
+      frameIntervals: [],
+      decodeRenderSamples: [],
+      errors: [],
+      reset() {
+        this.openedAt = performance.now();
+        this.firstFrameAt = null;
+        this.lastFrameAt = null;
+        this.decodedFrames = 0;
+        this.renderedFrames = 0;
+        this.droppedMetadata = 0;
+        this.totalBinaryBytes = 0;
+        this.frameIntervals = [];
+        this.decodeRenderSamples = [];
+        this.errors = [];
+      },
+      report() {
+        const elapsedMs = (this.lastFrameAt || performance.now()) - (this.firstFrameAt || this.openedAt);
+        const sortedIntervals = [...this.frameIntervals].sort((a, b) => a - b);
+        const sortedDecodeRender = [...this.decodeRenderSamples].sort((a, b) => a - b);
+        const percentile = (values, p) => {
+          if (!values.length) return null;
+          const index = Math.min(values.length - 1, Math.max(0, Math.ceil((p / 100) * values.length) - 1));
+          return Number(values[index].toFixed(2));
+        };
+        const average = (values) => values.length
+          ? Number((values.reduce((total, value) => total + value, 0) / values.length).toFixed(2))
+          : null;
+        return {
+          transport: this.transport,
+          decodedFrames: this.decodedFrames,
+          renderedFrames: this.renderedFrames,
+          renderedFps: elapsedMs > 0 ? Number((this.renderedFrames * 1000 / elapsedMs).toFixed(2)) : 0,
+          totalBinaryBytes: this.totalBinaryBytes,
+          frameIntervalAvgMs: average(this.frameIntervals),
+          frameIntervalP95Ms: percentile(sortedIntervals, 95),
+          frameIntervalP99Ms: percentile(sortedIntervals, 99),
+          decodeRenderAvgMs: average(this.decodeRenderSamples),
+          decodeRenderP95Ms: percentile(sortedDecodeRender, 95),
+          decodeRenderP99Ms: percentile(sortedDecodeRender, 99),
+          droppedMetadata: this.droppedMetadata,
+          errors: this.errors.slice(-20)
+        };
+      }
+    };
+    window.simxMetrics = metrics;
+    function flushMetrics() {
+      metricsEl.textContent = JSON.stringify(metrics.report());
+    }
+    setInterval(flushMetrics, 1000);
 
     function setStatus(text) { statusEl.textContent = text; }
     function send(payload) {
       if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload));
+    }
+    let lastKeyframeRequestAt = Number.NEGATIVE_INFINITY;
+    function requestKeyframe(reason) {
+      if (transport !== "h264") return;
+      const now = performance.now();
+      if (now - lastKeyframeRequestAt < 500) return;
+      lastKeyframeRequestAt = now;
+      send({ type: "requestKeyframe", reason });
     }
     function resumeStream() {
       paused = false;
       resumeEl.hidden = true;
       setStatus("Resuming...");
       send({ type: "resume" });
+      requestKeyframe("resume");
+    }
+    function bytesFromBase64(value) {
+      const binary = atob(value);
+      const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index++) {
+        bytes[index] = binary.charCodeAt(index);
+      }
+      return bytes;
+    }
+    function configureDecoder(message) {
+      if (transport !== "h264" || !("VideoDecoder" in window)) return;
+      if (decoder && decoder.state !== "closed") decoder.close();
+      awaitingKeyframe = true;
+      decoder = new VideoDecoder({
+        output(frame) {
+          const now = performance.now();
+          if (metrics.lastFrameAt !== null) metrics.frameIntervals.push(now - metrics.lastFrameAt);
+          if (metrics.firstFrameAt === null) metrics.firstFrameAt = now;
+          metrics.lastFrameAt = now;
+          metrics.decodedFrames += 1;
+          metrics.renderedFrames += 1;
+          const marker = frame.timestamp ? pendingDecodeMarkers.get(frame.timestamp) : null;
+          if (marker !== null && marker !== undefined) {
+            metrics.decodeRenderSamples.push(now - marker);
+            pendingDecodeMarkers.delete(frame.timestamp);
+          }
+          videoEl.width = frame.displayWidth;
+          videoEl.height = frame.displayHeight;
+          videoContext.drawImage(frame, 0, 0, videoEl.width, videoEl.height);
+          frame.close();
+          if (!paused) setStatus("Live H.264");
+          flushMetrics();
+        },
+        error(error) {
+          console.error(error);
+          metrics.errors.push(String(error));
+          setStatus("H.264 decode error");
+          awaitingKeyframe = true;
+          requestKeyframe("decode_error");
+        }
+      });
+      decoder.configure({
+        codec: message.codec || "avc1.64002a",
+        description: bytesFromBase64(message.description),
+        optimizeForLatency: true
+      });
+      metrics.configuredAt = performance.now();
+      flushMetrics();
+      setStatus("Live H.264");
+    }
+    const pendingDecodeMarkers = new Map();
+    function parseH264Envelope(bytes) {
+      if (bytes.byteLength < 28) throw new Error("H.264 envelope too short");
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      if (
+        view.getUint8(0) !== 0x53 ||
+        view.getUint8(1) !== 0x58 ||
+        view.getUint8(2) !== 0x48 ||
+        view.getUint8(3) !== 0x31
+      ) {
+        throw new Error("Invalid H.264 envelope magic");
+      }
+      const keyframe = (view.getUint8(4) & 1) === 1;
+      const generation = Number(view.getBigUint64(8));
+      const ptsMs = Number(view.getBigInt64(16));
+      const byteLength = view.getUint32(24);
+      if (28 + byteLength > bytes.byteLength) throw new Error("Invalid H.264 payload length");
+      return {
+        generation,
+        keyframe,
+        ptsMs,
+        data: bytes.slice(28, 28 + byteLength)
+      };
+    }
+    async function decodeVideoChunk(data) {
+      if (!decoder || decoder.state !== "configured") return;
+      const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(await data.arrayBuffer());
+      let envelope;
+      try {
+        envelope = parseH264Envelope(bytes);
+      } catch (error) {
+        metrics.errors.push(String(error));
+        flushMetrics();
+        return;
+      }
+      const timestamp = Number(envelope.ptsMs || 0) * 1000;
+      metrics.totalBinaryBytes += envelope.data.byteLength;
+      flushMetrics();
+      if (awaitingKeyframe && !envelope.keyframe) {
+        metrics.droppedMetadata += 1;
+        requestKeyframe("awaiting_keyframe");
+        flushMetrics();
+        return;
+      }
+      if (!envelope.keyframe && decoder.decodeQueueSize > 0) {
+        metrics.droppedMetadata += 1;
+        flushMetrics();
+        return;
+      }
+      awaitingKeyframe = false;
+      pendingDecodeMarkers.set(timestamp, performance.now());
+      decoder.decode(new EncodedVideoChunk({
+        type: envelope.keyframe ? "key" : "delta",
+        timestamp,
+        data: envelope.data
+      }));
     }
     function point(event) {
       const rect = screenEl.getBoundingClientRect();
@@ -95,13 +280,18 @@
     }
     function connect() {
       const slug = "__SIMX_SLUG__";
-      socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/${encodeURIComponent(slug)}/stream`);
-      socket.binaryType = "blob";
-      socket.onopen = () => { setStatus("Live"); send({ type: "resume" }); };
+      const streamPath = transport === "h264" ? "h264-stream" : "stream";
+      socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/${encodeURIComponent(slug)}/${streamPath}`);
+      socket.binaryType = transport === "h264" ? "arraybuffer" : "blob";
+      socket.onopen = () => {
+        setStatus("Live");
+        send({ type: "resume" });
+        requestKeyframe("connect");
+      };
       socket.onclose = () => { setStatus("Disconnected; reconnecting..."); setTimeout(connect, 800); };
       socket.onerror = () => setStatus("Stream error");
       socket.onmessage = (event) => {
-        if (!(event.data instanceof Blob)) {
+        if (typeof event.data === "string") {
           try {
             const message = JSON.parse(event.data);
             if (message.type === "paused") {
@@ -112,8 +302,14 @@
               paused = false;
               resumeEl.hidden = true;
               setStatus("Live");
+            } else if (message.type === "h264Config") {
+              configureDecoder(message);
             }
           } catch (_) {}
+          return;
+        }
+        if (transport === "h264") {
+          decodeVideoChunk(event.data);
           return;
         }
         if (objectUrl) URL.revokeObjectURL(objectUrl);
@@ -121,6 +317,11 @@
         frameEl.src = objectUrl;
         if (!paused) setStatus("Live");
       };
+    }
+    if (transport === "h264") {
+      frameEl.hidden = true;
+      videoEl.hidden = false;
+      if (!("VideoDecoder" in window)) setStatus("WebCodecs unavailable");
     }
     screenEl.addEventListener("pointerdown", (event) => {
       if (activePointerId !== null) finishTouch("cancelled");

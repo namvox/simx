@@ -14,9 +14,12 @@ fn main() {
     println!("cargo:rustc-link-arg=-Wl,-weak_framework,SimulatorKit");
     println!("cargo:rustc-link-lib=framework=Foundation");
     println!("cargo:rustc-link-lib=framework=CoreGraphics");
+    println!("cargo:rustc-link-lib=framework=CoreMedia");
     println!("cargo:rustc-link-lib=framework=CoreImage");
+    println!("cargo:rustc-link-lib=framework=CoreVideo");
     println!("cargo:rustc-link-lib=framework=ImageIO");
     println!("cargo:rustc-link-lib=framework=IOSurface");
+    println!("cargo:rustc-link-lib=framework=VideoToolbox");
 
     cc::Build::new()
         .file("native/src/simx_bridge.m")

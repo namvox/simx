@@ -19,6 +19,7 @@ use crate::pool::PoolService;
 
 const VIEWER_HTML: &str = include_str!("../viewer/index.html");
 const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+const MAX_H264_DELIVERY_AGE: Duration = Duration::from_millis(120);
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone)]
@@ -27,12 +28,29 @@ pub struct ServeConfig {
     pub port: u16,
     pub quality: f32,
     pub fps: u32,
+    pub transport: StreamTransport,
     pub idle_timeout: Duration,
     pub slug: String,
     pub udid: String,
     pub state_path: std::path::PathBuf,
     pub stats: Arc<Mutex<StreamStats>>,
     pub controllers: Arc<Mutex<Option<u64>>>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum StreamTransport {
+    #[default]
+    Jpeg,
+    H264,
+}
+
+impl StreamTransport {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Jpeg => "jpeg",
+            Self::H264 => "h264",
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -61,6 +79,8 @@ pub struct StreamStats {
     pub bytes_per_second_5s: f64,
     pub encode_latency_ms_p50: Option<u128>,
     pub encode_latency_ms_p95: Option<u128>,
+    pub delivery_latency_ms_p50: Option<u128>,
+    pub delivery_latency_ms_p95: Option<u128>,
     pub last_frame_age_ms: Option<u128>,
     pub last_send_age_ms: Option<u128>,
     pub last_delivery_latency_ms: Option<u128>,
@@ -79,11 +99,15 @@ pub struct StreamStats {
     #[serde(skip_serializing)]
     byte_samples: VecDeque<(Instant, usize)>,
     #[serde(skip_serializing)]
-    latency_samples: VecDeque<u128>,
+    encode_latency_samples: VecDeque<u128>,
+    #[serde(skip_serializing)]
+    delivery_latency_samples: VecDeque<u128>,
 }
 
 pub fn serve(config: ServeConfig) -> anyhow::Result<()> {
     validate_config(&config)?;
+    let frame_source: Arc<Mutex<Option<Arc<NativeFrameSource>>>> = Arc::new(Mutex::new(None));
+    let h264_source: Arc<Mutex<Option<Arc<EncodedFrameSource>>>> = Arc::new(Mutex::new(None));
     let listener = TcpListener::bind((config.host.as_str(), config.port))
         .with_context(|| format!("failed to bind {}:{}", config.host, config.port))?;
     listener.set_nonblocking(true)?;
@@ -101,8 +125,11 @@ pub fn serve(config: ServeConfig) -> anyhow::Result<()> {
         match listener.accept() {
             Ok((stream, _addr)) => {
                 let config = config.clone();
+                let frame_source = frame_source.clone();
+                let h264_source = h264_source.clone();
                 thread::spawn(move || {
-                    if let Err(error) = handle_connection(stream, config) {
+                    if let Err(error) = handle_connection(stream, config, frame_source, h264_source)
+                    {
                         eprintln!("connection error: {error:#}");
                     }
                 });
@@ -137,7 +164,12 @@ fn lease_is_active(config: &ServeConfig) -> anyhow::Result<bool> {
     }))
 }
 
-fn handle_connection(mut stream: TcpStream, config: ServeConfig) -> anyhow::Result<()> {
+fn handle_connection(
+    mut stream: TcpStream,
+    config: ServeConfig,
+    frame_source: Arc<Mutex<Option<Arc<NativeFrameSource>>>>,
+    h264_source: Arc<Mutex<Option<Arc<EncodedFrameSource>>>>,
+) -> anyhow::Result<()> {
     stream.set_nonblocking(false)?;
     let request = read_http_request(&mut stream)?;
     let target = request_path(&request).unwrap_or("/");
@@ -146,10 +178,22 @@ fn handle_connection(mut stream: TcpStream, config: ServeConfig) -> anyhow::Resu
         let key = header_value(&request, "sec-websocket-key")
             .context("missing Sec-WebSocket-Key")?
             .to_string();
+        let frame_source = frame_source_for(&config, &frame_source)?;
         write_ws_upgrade(&mut stream, &key)?;
-        stream.set_read_timeout(Some(Duration::from_millis(5)))?;
         stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-        stream_frames(stream, config)?;
+        stream.set_nonblocking(true)?;
+        stream_frames(stream, config, frame_source)?;
+        return Ok(());
+    }
+    if is_ws_upgrade(&request) && path == h264_stream_path(&config.slug) {
+        let key = header_value(&request, "sec-websocket-key")
+            .context("missing Sec-WebSocket-Key")?
+            .to_string();
+        let encoded_source = h264_source_for(&config, &h264_source)?;
+        write_ws_upgrade(&mut stream, &key)?;
+        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+        stream.set_nonblocking(true)?;
+        stream_h264_frames(stream, config, encoded_source)?;
         return Ok(());
     }
 
@@ -159,7 +203,9 @@ fn handle_connection(mut stream: TcpStream, config: ServeConfig) -> anyhow::Resu
             write_http_redirect(&mut stream, &target)
         }
         path if path == slug_path(&config.slug) || path == slug_path_slash(&config.slug) => {
-            let html = VIEWER_HTML.replace("__SIMX_SLUG__", &config.slug);
+            let html = VIEWER_HTML
+                .replace("__SIMX_SLUG__", &config.slug)
+                .replace("__SIMX_TRANSPORT__", config.transport.as_str());
             write_http_response(
                 &mut stream,
                 "200 OK",
@@ -192,6 +238,33 @@ fn stream_path(slug: &str) -> String {
     format!("/{slug}/stream")
 }
 
+fn h264_stream_path(slug: &str) -> String {
+    format!("/{slug}/h264-stream")
+}
+
+fn h264_frame_message(frame: &EncodedFrame) -> Vec<u8> {
+    let mut message = Vec::with_capacity(28 + frame.bytes.len());
+    message.extend_from_slice(b"SXH1");
+    message.push(u8::from(frame.keyframe));
+    message.extend_from_slice(&[0, 0, 0]);
+    message.extend_from_slice(&frame.generation.to_be_bytes());
+    message.extend_from_slice(&frame.pts_ms.to_be_bytes());
+    message.extend_from_slice(&(frame.bytes.len() as u32).to_be_bytes());
+    message.extend_from_slice(&frame.bytes);
+    message
+}
+
+fn h264_codec_string(config_bytes: &[u8]) -> String {
+    if config_bytes.len() >= 4 {
+        format!(
+            "avc1.{:02x}{:02x}{:02x}",
+            config_bytes[1], config_bytes[2], config_bytes[3]
+        )
+    } else {
+        "avc1.64002a".to_string()
+    }
+}
+
 fn stats_path(slug: &str) -> String {
     format!("/{slug}/stats")
 }
@@ -204,8 +277,11 @@ fn slug_path_slash(slug: &str) -> String {
     format!("/{slug}/")
 }
 
-fn stream_frames(mut stream: TcpStream, config: ServeConfig) -> anyhow::Result<()> {
-    let frame_source = NativeFrameSource::start(&config)?;
+fn stream_frames(
+    mut stream: TcpStream,
+    config: ServeConfig,
+    frame_source: Arc<NativeFrameSource>,
+) -> anyhow::Result<()> {
     let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
     let is_controller = acquire_controller(&config, client_id);
     let frame_interval = Duration::from_secs_f64(1.0 / config.fps as f64);
@@ -214,6 +290,7 @@ fn stream_frames(mut stream: TcpStream, config: ServeConfig) -> anyhow::Result<(
     let mut paused = false;
     let mut input_buffer = Vec::new();
     let mut last_sent_generation = 0_u64;
+    let mut next_frame_at = Instant::now();
     update_stats(&config, |stats| {
         stats.connected_clients = stats.connected_clients.saturating_add(1);
         stats.target_fps = config.fps;
@@ -236,13 +313,14 @@ fn stream_frames(mut stream: TcpStream, config: ServeConfig) -> anyhow::Result<(
         },
     )?;
     loop {
-        let events = read_ws_events(&mut stream, &mut input_buffer);
+        let events = coalesce_touch_move_events(read_ws_events(&mut stream, &mut input_buffer));
         let mut should_close = false;
         for event in events {
             match event {
                 WsEvent::Text(text) => {
                     if is_resume_message(&text) {
                         paused = false;
+                        next_frame_at = Instant::now();
                         last_activity = Instant::now();
                         update_stats(&config, |stats| stats.paused = false);
                         write_ws_text(&mut stream, r#"{"type":"resumed"}"#)?;
@@ -292,6 +370,7 @@ fn stream_frames(mut stream: TcpStream, config: ServeConfig) -> anyhow::Result<(
             write_ws_text(&mut stream, r#"{"type":"paused","reason":"idle_timeout"}"#)?;
         }
         if paused {
+            next_frame_at = Instant::now();
             thread::sleep(Duration::from_millis(200));
             continue;
         }
@@ -318,15 +397,265 @@ fn stream_frames(mut stream: TcpStream, config: ServeConfig) -> anyhow::Result<(
                     frame.len(),
                     Duration::from_secs(5),
                 );
-                stats.latency_samples.push_back(latency);
-                while stats.latency_samples.len() > 240 {
-                    stats.latency_samples.pop_front();
+                stats.delivery_latency_samples.push_back(latency);
+                while stats.delivery_latency_samples.len() > 240 {
+                    stats.delivery_latency_samples.pop_front();
                 }
             });
         }
-        thread::sleep(frame_interval);
+        sleep_until_next_frame(&mut next_frame_at, frame_interval);
     }
     let _ = write_ws_frame(&mut stream, 0x8, &[]);
+    Ok(())
+}
+
+fn h264_source_for(
+    config: &ServeConfig,
+    h264_source: &Arc<Mutex<Option<Arc<EncodedFrameSource>>>>,
+) -> anyhow::Result<Arc<EncodedFrameSource>> {
+    let mut source = h264_source
+        .lock()
+        .map_err(|_| anyhow::anyhow!("h264 source lock was poisoned"))?;
+    if let Some(source) = source.as_ref() {
+        return Ok(source.clone());
+    }
+    let created = Arc::new(EncodedFrameSource::start_h264(config, 16 * 1000 * 1000)?);
+    *source = Some(created.clone());
+    Ok(created)
+}
+
+fn frame_source_for(
+    config: &ServeConfig,
+    frame_source: &Arc<Mutex<Option<Arc<NativeFrameSource>>>>,
+) -> anyhow::Result<Arc<NativeFrameSource>> {
+    let mut source = frame_source
+        .lock()
+        .map_err(|_| anyhow::anyhow!("frame source lock was poisoned"))?;
+    if let Some(source) = source.as_ref() {
+        return Ok(source.clone());
+    }
+    let created = Arc::new(NativeFrameSource::start(config)?);
+    *source = Some(created.clone());
+    Ok(created)
+}
+
+fn stream_h264_frames(
+    mut stream: TcpStream,
+    config: ServeConfig,
+    encoded_source: Arc<EncodedFrameSource>,
+) -> anyhow::Result<()> {
+    let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
+    let is_controller = acquire_controller(&config, client_id);
+    let frame_interval = Duration::from_secs_f64(1.0 / config.fps as f64);
+    let mut last_lease_check = Instant::now();
+    let mut last_activity = Instant::now();
+    let mut paused = false;
+    let mut input_buffer = Vec::new();
+    let mut last_sent_generation = 0_u64;
+    let mut last_config: Option<Vec<u8>> = None;
+    let mut next_frame_at = Instant::now();
+    update_stats(&config, |stats| {
+        stats.connected_clients = stats.connected_clients.saturating_add(1);
+        stats.target_fps = config.fps;
+        stats.paused = false;
+        stats.controller_connected = is_controller;
+    });
+    let _client_stats = ClientStatsGuard::new(config.stats.clone());
+    let _controller = ControllerGuard::new(
+        config.controllers.clone(),
+        config.stats.clone(),
+        client_id,
+        is_controller,
+    );
+    write_ws_text(
+        &mut stream,
+        if is_controller {
+            r#"{"type":"client","role":"controller","transport":"h264"}"#
+        } else {
+            r#"{"type":"client","role":"viewer","transport":"h264"}"#
+        },
+    )?;
+    if let Err(error) = encoded_source.request_keyframe() {
+        eprintln!("keyframe request error: {error:#}");
+    }
+    loop {
+        let events = coalesce_touch_move_events(read_ws_events(&mut stream, &mut input_buffer));
+        let mut should_close = false;
+        for event in events {
+            match event {
+                WsEvent::Text(text) => {
+                    if is_resume_message(&text) {
+                        paused = false;
+                        next_frame_at = Instant::now();
+                        last_activity = Instant::now();
+                        update_stats(&config, |stats| stats.paused = false);
+                        if let Err(error) = encoded_source.request_keyframe() {
+                            eprintln!("keyframe request error: {error:#}");
+                        }
+                        write_ws_text(&mut stream, r#"{"type":"resumed"}"#)?;
+                    } else if is_keyframe_request_message(&text) {
+                        last_activity = Instant::now();
+                        let mut sent_cached_keyframe = false;
+                        if let Some(frame) = encoded_source.latest_keyframe() {
+                            send_h264_frame(
+                                &mut stream,
+                                &config,
+                                &frame,
+                                &mut last_config,
+                                &mut last_sent_generation,
+                            )?;
+                            sent_cached_keyframe = true;
+                            next_frame_at = Instant::now();
+                        }
+                        if let Err(error) = encoded_source.request_keyframe() {
+                            if !sent_cached_keyframe {
+                                if let Some(ack) = input_ack(&text, false, &error.to_string()) {
+                                    write_ws_text(&mut stream, &ack)?;
+                                }
+                                eprintln!("keyframe request error: {error:#}");
+                                continue;
+                            }
+                            eprintln!("keyframe request error: {error:#}");
+                        }
+                        if let Some(ack) = input_ack(&text, true, "ok") {
+                            write_ws_text(&mut stream, &ack)?;
+                        }
+                    } else if is_controller {
+                        last_activity = Instant::now();
+                        match encoded_source.handle_hid_input(&text) {
+                            Ok(acks) => {
+                                for ack in acks {
+                                    write_ws_text(&mut stream, &ack)?;
+                                }
+                            }
+                            Err(error) => {
+                                if let Some(ack) = input_ack(&text, false, &error.to_string()) {
+                                    write_ws_text(&mut stream, &ack)?;
+                                }
+                                eprintln!("input error: {error:#}");
+                            }
+                        }
+                    } else if let Some(ack) = input_ack(&text, false, "client is viewer-only") {
+                        write_ws_text(&mut stream, &ack)?;
+                    }
+                }
+                WsEvent::Ping(payload) => {
+                    write_ws_frame(&mut stream, 0xA, &payload)?;
+                }
+                WsEvent::Close => {
+                    let _ = write_ws_frame(&mut stream, 0x8, &[]);
+                    should_close = true;
+                    break;
+                }
+            }
+        }
+        if should_close {
+            break;
+        }
+        if last_lease_check.elapsed() >= Duration::from_secs(1) {
+            if !lease_is_active(&config)? {
+                break;
+            }
+            last_lease_check = Instant::now();
+        }
+        if !paused && last_activity.elapsed() >= config.idle_timeout {
+            paused = true;
+            update_stats(&config, |stats| stats.paused = true);
+            write_ws_text(&mut stream, r#"{"type":"paused","reason":"idle_timeout"}"#)?;
+        }
+        if paused {
+            next_frame_at = Instant::now();
+            thread::sleep(Duration::from_millis(200));
+            continue;
+        }
+        if let Some(frame) = encoded_source.latest_frame_after(last_sent_generation) {
+            if !frame.keyframe && frame.received_at.elapsed() > MAX_H264_DELIVERY_AGE {
+                if let Err(error) = encoded_source.request_keyframe() {
+                    eprintln!("keyframe request error: {error:#}");
+                }
+                sleep_until_next_frame(&mut next_frame_at, frame_interval);
+                continue;
+            }
+            send_h264_frame(
+                &mut stream,
+                &config,
+                &frame,
+                &mut last_config,
+                &mut last_sent_generation,
+            )?;
+        }
+        sleep_until_next_frame(&mut next_frame_at, frame_interval);
+    }
+    let _ = write_ws_frame(&mut stream, 0x8, &[]);
+    Ok(())
+}
+
+fn sleep_until_next_frame(next_frame_at: &mut Instant, frame_interval: Duration) {
+    *next_frame_at += frame_interval;
+    loop {
+        let now = Instant::now();
+        if *next_frame_at <= now {
+            if now.duration_since(*next_frame_at) >= frame_interval {
+                *next_frame_at = now;
+            }
+            return;
+        }
+        let remaining = *next_frame_at - now;
+        if remaining > Duration::from_millis(2) {
+            thread::sleep(remaining - Duration::from_millis(1));
+        } else {
+            thread::yield_now();
+        }
+    }
+}
+
+fn send_h264_frame(
+    stream: &mut TcpStream,
+    config: &ServeConfig,
+    frame: &EncodedFrame,
+    last_config: &mut Option<Vec<u8>>,
+    last_sent_generation: &mut u64,
+) -> anyhow::Result<()> {
+    let dropped = frame
+        .generation
+        .saturating_sub(*last_sent_generation)
+        .saturating_sub(1);
+    *last_sent_generation = frame.generation;
+    if frame.decoder_config.is_some() && frame.decoder_config != *last_config {
+        last_config.clone_from(&frame.decoder_config);
+        if let Some(config_bytes) = last_config {
+            let config_message = serde_json::json!({
+                "type": "h264Config",
+                "codec": h264_codec_string(config_bytes),
+                "description": base64::engine::general_purpose::STANDARD.encode(config_bytes),
+            })
+            .to_string();
+            write_ws_text(stream, &config_message)?;
+        }
+    }
+
+    let encoded_message = h264_frame_message(frame);
+    write_ws_frame(stream, 0x2, &encoded_message)?;
+    update_stats(config, |stats| {
+        let now = Instant::now();
+        stats.sent_frames = stats.sent_frames.saturating_add(1);
+        stats.dropped_frames = stats.dropped_frames.saturating_add(dropped);
+        stats.last_frame_bytes = encoded_message.len();
+        stats.last_sent_at = Some(now);
+        let latency = now.duration_since(frame.received_at).as_millis();
+        stats.last_delivery_latency_ms = Some(latency);
+        push_sample(&mut stats.sent_samples, now, Duration::from_secs(5));
+        push_byte_sample(
+            &mut stats.byte_samples,
+            now,
+            encoded_message.len(),
+            Duration::from_secs(5),
+        );
+        stats.delivery_latency_samples.push_back(latency);
+        while stats.delivery_latency_samples.len() > 240 {
+            stats.delivery_latency_samples.pop_front();
+        }
+    });
     Ok(())
 }
 
@@ -427,10 +756,14 @@ fn snapshot_stats(config: &ServeConfig) -> StreamStats {
         bytes_since(&stats.byte_samples, now, Duration::from_secs(1)) as f64;
     stats.bytes_per_second_5s =
         bytes_since(&stats.byte_samples, now, Duration::from_secs(5)) as f64 / 5.0;
-    let mut latencies: Vec<_> = stats.latency_samples.iter().copied().collect();
-    latencies.sort_unstable();
-    stats.encode_latency_ms_p50 = percentile(&latencies, 50);
-    stats.encode_latency_ms_p95 = percentile(&latencies, 95);
+    let mut encode_latencies: Vec<_> = stats.encode_latency_samples.iter().copied().collect();
+    encode_latencies.sort_unstable();
+    stats.encode_latency_ms_p50 = percentile(&encode_latencies, 50);
+    stats.encode_latency_ms_p95 = percentile(&encode_latencies, 95);
+    let mut delivery_latencies: Vec<_> = stats.delivery_latency_samples.iter().copied().collect();
+    delivery_latencies.sort_unstable();
+    stats.delivery_latency_ms_p50 = percentile(&delivery_latencies, 50);
+    stats.delivery_latency_ms_p95 = percentile(&delivery_latencies, 95);
     stats.last_frame_age_ms = stats
         .last_source_at
         .map(|last_source_at| now.duration_since(last_source_at).as_millis());
@@ -531,8 +864,35 @@ struct LatestFrame {
     received_at: Option<Instant>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedFrame {
+    pub generation: u64,
+    pub bytes: Vec<u8>,
+    pub keyframe: bool,
+    pub pts_ms: i64,
+    pub decoder_config: Option<Vec<u8>>,
+    pub received_at: Instant,
+}
+
+#[derive(Default)]
+struct LatestEncodedFrame {
+    generation: u64,
+    bytes: Vec<u8>,
+    keyframe: bool,
+    pts_ms: i64,
+    decoder_config: Option<Vec<u8>>,
+    received_at: Option<Instant>,
+    frames: VecDeque<EncodedFrame>,
+}
+
 struct FrameContext {
     latest: Mutex<LatestFrame>,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    stats: Arc<Mutex<StreamStats>>,
+}
+
+struct EncodedFrameContext {
+    latest: Mutex<LatestEncodedFrame>,
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     stats: Arc<Mutex<StreamStats>>,
 }
@@ -543,7 +903,42 @@ struct NativeFrameSource {
     context: Arc<FrameContext>,
 }
 
+pub struct EncodedFrameSource {
+    #[cfg(target_os = "macos")]
+    handle: *mut c_void,
+    context: Arc<EncodedFrameContext>,
+}
+
+// The native streamer handle is retained for the serve process lifetime. Frame
+// data shared with client threads is guarded by `FrameContext::latest`, and HID
+// calls go through SimulatorKit's asynchronous delivery API.
+unsafe impl Send for NativeFrameSource {}
+unsafe impl Sync for NativeFrameSource {}
+unsafe impl Send for EncodedFrameSource {}
+unsafe impl Sync for EncodedFrameSource {}
+
 impl NativeFrameSource {
+    #[cfg(test)]
+    fn test_with_frame(
+        stats: Arc<Mutex<StreamStats>>,
+        generation: u64,
+        frame: Vec<u8>,
+        received_at: Instant,
+    ) -> Self {
+        Self {
+            #[cfg(target_os = "macos")]
+            handle: ptr::null_mut(),
+            context: Arc::new(FrameContext {
+                latest: Mutex::new(LatestFrame {
+                    generation,
+                    frame,
+                    received_at: Some(received_at),
+                }),
+                stats,
+            }),
+        }
+    }
+
     #[cfg(target_os = "macos")]
     fn start(config: &ServeConfig) -> anyhow::Result<Self> {
         let developer_dir = developer_dir()?;
@@ -560,8 +955,12 @@ impl NativeFrameSource {
                 developer_dir.as_ptr(),
                 udid.as_ptr(),
                 config.quality,
-                native_frame_callback,
+                Some(native_frame_callback),
                 raw_context,
+                config.fps as i32,
+                8 * 1000 * 1000,
+                None,
+                ptr::null_mut(),
                 &mut error,
             )
         };
@@ -789,6 +1188,349 @@ impl NativeFrameSource {
     }
 }
 
+impl EncodedFrameSource {
+    #[cfg(target_os = "macos")]
+    pub fn start_h264(config: &ServeConfig, bitrate: i32) -> anyhow::Result<Self> {
+        let developer_dir = developer_dir()?;
+        let developer_dir = CString::new(developer_dir)?;
+        let udid = CString::new(config.udid.clone())?;
+        let context = Arc::new(EncodedFrameContext {
+            latest: Mutex::new(LatestEncodedFrame::default()),
+            stats: config.stats.clone(),
+        });
+        let raw_context = Arc::into_raw(context.clone()) as *mut c_void;
+        let mut error: *mut c_char = ptr::null_mut();
+        let handle = unsafe {
+            simx_frame_stream_start(
+                developer_dir.as_ptr(),
+                udid.as_ptr(),
+                config.quality,
+                None,
+                ptr::null_mut(),
+                config.fps as i32,
+                bitrate,
+                Some(native_encoded_frame_callback),
+                raw_context,
+                &mut error,
+            )
+        };
+        unsafe {
+            let _ = Arc::from_raw(raw_context as *const EncodedFrameContext);
+        }
+        if handle.is_null() {
+            let message = unsafe {
+                if error.is_null() {
+                    "native h264 stream bridge failed".to_string()
+                } else {
+                    let message = CStr::from_ptr(error).to_string_lossy().into_owned();
+                    simx_bridge_free_string(error);
+                    message
+                }
+            };
+            bail!("{message}");
+        }
+        Ok(Self { handle, context })
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn start_h264(config: &ServeConfig, bitrate: i32) -> anyhow::Result<Self> {
+        let _ = (config, bitrate);
+        bail!("h264 streaming requires macOS private Simulator APIs and VideoToolbox");
+    }
+
+    pub fn latest_frame_after(&self, generation: u64) -> Option<EncodedFrame> {
+        let latest = self.context.latest.lock().ok()?;
+        if latest.generation <= generation || (latest.bytes.is_empty() && latest.frames.is_empty())
+        {
+            return None;
+        }
+        if generation == 0 {
+            if let Some(frame) = latest
+                .frames
+                .iter()
+                .rev()
+                .find(|frame| frame.keyframe)
+                .cloned()
+            {
+                return Some(frame);
+            }
+        }
+        if let Some(frame) = latest
+            .frames
+            .iter()
+            .find(|frame| frame.generation == generation.saturating_add(1))
+            .cloned()
+        {
+            if frame.received_at.elapsed() > MAX_H264_DELIVERY_AGE {
+                if let Some(keyframe) = latest
+                    .frames
+                    .iter()
+                    .rev()
+                    .find(|frame| frame.generation > generation && frame.keyframe)
+                    .cloned()
+                {
+                    return Some(keyframe);
+                }
+            }
+            return Some(frame);
+        }
+        if let Some(frame) = latest
+            .frames
+            .iter()
+            .find(|frame| frame.generation > generation && frame.keyframe)
+            .cloned()
+        {
+            return Some(frame);
+        }
+        if latest.generation != generation.saturating_add(1) && !latest.keyframe && generation != 0
+        {
+            return None;
+        }
+        Some(EncodedFrame {
+            generation: latest.generation,
+            bytes: latest.bytes.clone(),
+            keyframe: latest.keyframe,
+            pts_ms: latest.pts_ms,
+            decoder_config: latest.decoder_config.clone(),
+            received_at: latest.received_at.unwrap_or_else(Instant::now),
+        })
+    }
+
+    pub fn latest_keyframe(&self) -> Option<EncodedFrame> {
+        let latest = self.context.latest.lock().ok()?;
+        if let Some(frame) = latest
+            .frames
+            .iter()
+            .rev()
+            .find(|frame| frame.keyframe)
+            .cloned()
+        {
+            return Some(frame);
+        }
+        if latest.keyframe && !latest.bytes.is_empty() {
+            return Some(EncodedFrame {
+                generation: latest.generation,
+                bytes: latest.bytes.clone(),
+                keyframe: true,
+                pts_ms: latest.pts_ms,
+                decoder_config: latest.decoder_config.clone(),
+                received_at: latest.received_at.unwrap_or_else(Instant::now),
+            });
+        }
+        None
+    }
+
+    fn request_keyframe(&self) -> anyhow::Result<()> {
+        self.request_native_keyframe()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn request_native_keyframe(&self) -> anyhow::Result<()> {
+        let mut error: *mut c_char = ptr::null_mut();
+        let ok = unsafe { simx_stream_request_keyframe(self.handle, &mut error) };
+        native_bool_result(ok, error)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn request_native_keyframe(&self) -> anyhow::Result<()> {
+        bail!("keyframe requests require macOS private Simulator APIs and VideoToolbox");
+    }
+
+    fn handle_hid_input(&self, text: &str) -> anyhow::Result<Vec<String>> {
+        let value: serde_json::Value = serde_json::from_str(text)?;
+        let result = match value.get("type").and_then(|value| value.as_str()) {
+            Some("touch") => {
+                let nx = value
+                    .get("nx")
+                    .and_then(|value| value.as_f64())
+                    .unwrap_or(0.0);
+                let ny = value
+                    .get("ny")
+                    .and_then(|value| value.as_f64())
+                    .unwrap_or(0.0);
+                let phase = value
+                    .get("phase")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let down = matches!(phase, "began" | "moved");
+                self.send_touch(nx, ny, down)
+            }
+            Some("swipe") | Some("drag") => self.send_drag_or_swipe(&value),
+            Some("longPressScroll") | Some("long_press_scroll") => {
+                self.send_long_press_scroll(&value)
+            }
+            Some("key") => {
+                let phase = value
+                    .get("phase")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let down = phase == "down";
+                let code = value
+                    .get("code")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                if let Some(key_code) = browser_code_to_hid(code) {
+                    self.send_key_with_modifiers(key_code, down, &value)
+                } else {
+                    Ok(())
+                }
+            }
+            Some("paste") => {
+                let text = value
+                    .get("text")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                self.send_text(text)
+            }
+            Some("button")
+                if value.get("button").and_then(|value| value.as_str()) == Some("home") =>
+            {
+                self.press_home()
+            }
+            _ => Ok(()),
+        };
+        result?;
+        Ok(input_ack(text, true, "ok").into_iter().collect())
+    }
+
+    fn send_drag_or_swipe(&self, value: &serde_json::Value) -> anyhow::Result<()> {
+        let from = value.get("from").unwrap_or(value);
+        let to = value.get("to").unwrap_or(value);
+        let from_x = from
+            .get("nx")
+            .and_then(|value| value.as_f64())
+            .unwrap_or(0.5);
+        let from_y = from
+            .get("ny")
+            .and_then(|value| value.as_f64())
+            .unwrap_or(0.5);
+        let to_x = to
+            .get("nx")
+            .and_then(|value| value.as_f64())
+            .unwrap_or(from_x);
+        let to_y = to
+            .get("ny")
+            .and_then(|value| value.as_f64())
+            .unwrap_or(from_y);
+        let steps = value
+            .get("steps")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(8)
+            .clamp(2, 60);
+        self.send_touch(from_x, from_y, true)?;
+        for step in 1..steps {
+            let ratio = step as f64 / steps as f64;
+            self.send_touch(
+                from_x + (to_x - from_x) * ratio,
+                from_y + (to_y - from_y) * ratio,
+                true,
+            )?;
+            thread::sleep(Duration::from_millis(8));
+        }
+        self.send_touch(to_x, to_y, false)
+    }
+
+    fn send_long_press_scroll(&self, value: &serde_json::Value) -> anyhow::Result<()> {
+        let plan = long_press_scroll_plan(value);
+        self.send_touch(plan.start_nx, plan.start_ny, true)?;
+        thread::sleep(plan.hold);
+        for step in 1..plan.steps {
+            let ratio = step as f64 / plan.steps as f64;
+            self.send_touch(
+                plan.start_nx + (plan.end_nx - plan.start_nx) * ratio,
+                plan.start_ny + (plan.end_ny - plan.start_ny) * ratio,
+                true,
+            )?;
+            thread::sleep(Duration::from_millis(8));
+        }
+        self.send_touch(plan.end_nx, plan.end_ny, false)
+    }
+
+    fn send_key_with_modifiers(
+        &self,
+        key_code: u16,
+        down: bool,
+        value: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let modifiers = modifier_key_codes(value);
+        if down {
+            for modifier in &modifiers {
+                self.send_key(*modifier, true)?;
+            }
+            self.send_key(key_code, true)
+        } else {
+            self.send_key(key_code, false)?;
+            for modifier in modifiers.iter().rev() {
+                self.send_key(*modifier, false)?;
+            }
+            Ok(())
+        }
+    }
+
+    fn send_text(&self, text: &str) -> anyhow::Result<()> {
+        for ch in text.chars() {
+            let Some((key_code, shift)) = char_to_hid(ch) else {
+                continue;
+            };
+            if shift {
+                self.send_key(0xe1, true)?;
+            }
+            self.send_key(key_code, true)?;
+            self.send_key(key_code, false)?;
+            if shift {
+                self.send_key(0xe1, false)?;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn send_touch(&self, nx: f64, ny: f64, down: bool) -> anyhow::Result<()> {
+        let mut error: *mut c_char = ptr::null_mut();
+        let ok = unsafe { simx_hid_touch(self.handle, nx, ny, i32::from(down), &mut error) };
+        native_bool_result(ok, error)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn send_touch(&self, nx: f64, ny: f64, down: bool) -> anyhow::Result<()> {
+        let _ = (nx, ny, down);
+        bail!("HID input requires macOS private Simulator APIs");
+    }
+
+    #[cfg(target_os = "macos")]
+    fn send_key(&self, key_code: u16, down: bool) -> anyhow::Result<()> {
+        let mut error: *mut c_char = ptr::null_mut();
+        let ok = unsafe { simx_hid_key(self.handle, key_code, i32::from(down), &mut error) };
+        native_bool_result(ok, error)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn send_key(&self, key_code: u16, down: bool) -> anyhow::Result<()> {
+        let _ = (key_code, down);
+        bail!("HID input requires macOS private Simulator APIs");
+    }
+
+    #[cfg(target_os = "macos")]
+    fn press_home(&self) -> anyhow::Result<()> {
+        let mut error: *mut c_char = ptr::null_mut();
+        let ok = unsafe { simx_hid_home(self.handle, &mut error) };
+        native_bool_result(ok, error)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn press_home(&self) -> anyhow::Result<()> {
+        bail!("HID input requires macOS private Simulator APIs");
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for EncodedFrameSource {
+    fn drop(&mut self) {
+        unsafe { simx_frame_stream_stop(self.handle) };
+    }
+}
+
 #[cfg(target_os = "macos")]
 impl Drop for NativeFrameSource {
     fn drop(&mut self) {
@@ -797,7 +1539,12 @@ impl Drop for NativeFrameSource {
 }
 
 #[cfg(target_os = "macos")]
-extern "C" fn native_frame_callback(bytes: *const c_uchar, length: c_ulong, context: *mut c_void) {
+extern "C" fn native_frame_callback(
+    bytes: *const c_uchar,
+    length: c_ulong,
+    encode_latency_ms: i64,
+    context: *mut c_void,
+) {
     if bytes.is_null() || context.is_null() || length == 0 {
         return;
     }
@@ -817,7 +1564,76 @@ extern "C" fn native_frame_callback(bytes: *const c_uchar, length: c_ulong, cont
             stats.last_frame_bytes = frame.len();
             stats.last_source_at = Some(now);
             push_sample(&mut stats.source_samples, now, Duration::from_secs(5));
+            push_latency_sample(&mut stats.encode_latency_samples, encode_latency_ms);
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+extern "C" fn native_encoded_frame_callback(
+    bytes: *const c_uchar,
+    length: c_ulong,
+    keyframe: i32,
+    pts_ms: i64,
+    config_bytes: *const c_uchar,
+    config_length: c_ulong,
+    encode_latency_ms: i64,
+    context: *mut c_void,
+) {
+    if bytes.is_null() || context.is_null() || length == 0 {
+        return;
+    }
+    let context = unsafe { &*(context as *const EncodedFrameContext) };
+    if let Ok(mut latest) = context.latest.lock() {
+        let frame = unsafe { std::slice::from_raw_parts(bytes, length as usize) };
+        let now = Instant::now();
+        let generation = latest.generation.saturating_add(1);
+        let decoder_config = if config_bytes.is_null() || config_length == 0 {
+            None
+        } else {
+            Some(unsafe {
+                std::slice::from_raw_parts(config_bytes, config_length as usize).to_vec()
+            })
+        };
+        latest.bytes.clear();
+        latest.bytes.extend_from_slice(frame);
+        latest.generation = generation;
+        latest.keyframe = keyframe != 0;
+        latest.pts_ms = pts_ms;
+        latest.decoder_config.clone_from(&decoder_config);
+        latest.received_at = Some(now);
+        latest.frames.push_back(EncodedFrame {
+            generation,
+            bytes: frame.to_vec(),
+            keyframe: keyframe != 0,
+            pts_ms,
+            decoder_config,
+            received_at: now,
+        });
+        while latest.frames.len() > 240 {
+            latest.frames.pop_front();
+        }
+        if let Ok(mut stats) = context.stats.lock() {
+            if stats.started_at.is_none() {
+                stats.started_at = Some(now);
+            }
+            stats.source_frames = stats.source_frames.saturating_add(1);
+            stats.last_frame_bytes = frame.len();
+            stats.last_source_at = Some(now);
+            push_sample(&mut stats.source_samples, now, Duration::from_secs(5));
+            push_latency_sample(&mut stats.encode_latency_samples, encode_latency_ms);
+        }
+    }
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn push_latency_sample(samples: &mut VecDeque<u128>, latency_ms: i64) {
+    if latency_ms < 0 {
+        return;
+    }
+    samples.push_back(latency_ms as u128);
+    while samples.len() > 240 {
+        samples.pop_front();
     }
 }
 
@@ -836,6 +1652,18 @@ fn input_ack(text: &str, ok: bool, message: &str) -> Option<String> {
         })
         .to_string(),
     )
+}
+
+fn is_keyframe_request_message(text: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("type")
+                .and_then(|value| value.as_str())
+                .map(|message_type| message_type == "requestKeyframe")
+        })
+        .unwrap_or(false)
 }
 
 fn modifier_key_codes(value: &serde_json::Value) -> Vec<u16> {
@@ -1078,12 +1906,28 @@ extern "C" {
         developer_dir: *const c_char,
         udid: *const c_char,
         quality: f32,
-        callback: extern "C" fn(*const c_uchar, c_ulong, *mut c_void),
+        callback: Option<extern "C" fn(*const c_uchar, c_ulong, i64, *mut c_void)>,
         callback_context: *mut c_void,
+        target_fps: i32,
+        bitrate: i32,
+        encoded_callback: Option<
+            extern "C" fn(
+                *const c_uchar,
+                c_ulong,
+                i32,
+                i64,
+                *const c_uchar,
+                c_ulong,
+                i64,
+                *mut c_void,
+            ),
+        >,
+        encoded_callback_context: *mut c_void,
         error: *mut *mut c_char,
     ) -> *mut c_void;
     fn simx_frame_stream_stop(handle: *mut c_void);
     fn simx_bridge_free_string(value: *mut c_char);
+    fn simx_stream_request_keyframe(handle: *mut c_void, error: *mut *mut c_char) -> i32;
     fn simx_hid_touch(
         handle: *mut c_void,
         nx: f64,
@@ -1172,8 +2016,31 @@ fn write_ws_frame(stream: &mut TcpStream, opcode: u8, payload: &[u8]) -> anyhow:
             header.extend_from_slice(&(len as u64).to_be_bytes());
         }
     }
-    stream.write_all(&header)?;
-    stream.write_all(payload)?;
+    write_ws_bytes(stream, &header)?;
+    write_ws_bytes(stream, payload)?;
+    Ok(())
+}
+
+fn write_ws_bytes(stream: &mut TcpStream, mut bytes: &[u8]) -> anyhow::Result<()> {
+    let started = Instant::now();
+    while !bytes.is_empty() {
+        match stream.write(bytes) {
+            Ok(0) => bail!("websocket write returned zero bytes"),
+            Ok(written) => bytes = &bytes[written..],
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                if started.elapsed() >= Duration::from_secs(5) {
+                    return Err(error).context("websocket write timed out");
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
     Ok(())
 }
 
@@ -1185,6 +2052,37 @@ enum WsEvent {
     Text(String),
     Ping(Vec<u8>),
     Close,
+}
+
+fn coalesce_touch_move_events(events: Vec<WsEvent>) -> Vec<WsEvent> {
+    let mut coalesced = Vec::with_capacity(events.len());
+    let mut pending_move: Option<String> = None;
+    for event in events {
+        match event {
+            WsEvent::Text(text) if is_unacknowledged_touch_move(&text) => {
+                pending_move = Some(text);
+            }
+            event => {
+                if let Some(text) = pending_move.take() {
+                    coalesced.push(WsEvent::Text(text));
+                }
+                coalesced.push(event);
+            }
+        }
+    }
+    if let Some(text) = pending_move {
+        coalesced.push(WsEvent::Text(text));
+    }
+    coalesced
+}
+
+fn is_unacknowledged_touch_move(text: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return false;
+    };
+    value.get("type").and_then(|value| value.as_str()) == Some("touch")
+        && value.get("phase").and_then(|value| value.as_str()) == Some("moved")
+        && value.get("ack").and_then(|value| value.as_bool()) != Some(true)
 }
 
 fn read_ws_events(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> Vec<WsEvent> {
@@ -1293,13 +2191,17 @@ fn is_resume_message(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use super::{
-        acquire_controller, char_to_hid, input_ack, is_resume_message, lease_is_active,
-        long_press_scroll_plan, parse_next_ws_event, slug_path, slug_path_slash, stats_path,
-        stream_path, websocket_accept, ServeConfig, StreamStats, WsEvent,
+        acquire_controller, char_to_hid, h264_codec_string, h264_stream_path, input_ack,
+        is_keyframe_request_message, is_resume_message, is_unacknowledged_touch_move,
+        lease_is_active, long_press_scroll_plan, parse_next_ws_event, slug_path, slug_path_slash,
+        stats_path, stream_path, websocket_accept, EncodedFrame, EncodedFrameContext,
+        EncodedFrameSource, LatestEncodedFrame, NativeFrameSource, ServeConfig, StreamStats,
+        StreamTransport, WsEvent,
     };
     use serde_json::json;
     use tempfile::TempDir;
@@ -1315,6 +2217,7 @@ mod tests {
     #[test]
     fn builds_slug_scoped_stream_path() {
         assert_eq!(stream_path("slug-a"), "/slug-a/stream");
+        assert_eq!(h264_stream_path("slug-a"), "/slug-a/h264-stream");
         assert_eq!(stats_path("slug-a"), "/slug-a/stats");
     }
 
@@ -1333,6 +2236,61 @@ mod tests {
             _ => panic!("expected text event"),
         }
         assert!(frame.is_empty());
+    }
+
+    #[test]
+    fn detects_only_unacknowledged_touch_moves_as_coalescible() {
+        assert!(is_unacknowledged_touch_move(
+            r#"{"type":"touch","phase":"moved","nx":0.1,"ny":0.2}"#
+        ));
+        assert!(!is_unacknowledged_touch_move(
+            r#"{"type":"touch","phase":"moved","ack":true}"#
+        ));
+        assert!(!is_unacknowledged_touch_move(
+            r#"{"type":"touch","phase":"began"}"#
+        ));
+        assert!(!is_unacknowledged_touch_move(
+            r#"{"type":"key","phase":"down"}"#
+        ));
+    }
+
+    #[test]
+    fn detects_keyframe_request_messages() {
+        assert!(is_keyframe_request_message(
+            r#"{"type":"requestKeyframe","reason":"decode_error"}"#
+        ));
+        assert!(!is_keyframe_request_message(r#"{"type":"resume"}"#));
+        assert!(!is_keyframe_request_message("not-json"));
+    }
+
+    #[test]
+    fn coalesces_adjacent_touch_moves_but_preserves_boundaries() {
+        let events = super::coalesce_touch_move_events(vec![
+            WsEvent::Text(r#"{"type":"touch","phase":"began"}"#.to_string()),
+            WsEvent::Text(r#"{"type":"touch","phase":"moved","nx":0.1}"#.to_string()),
+            WsEvent::Text(r#"{"type":"touch","phase":"moved","nx":0.2}"#.to_string()),
+            WsEvent::Ping(vec![1, 2, 3]),
+            WsEvent::Text(r#"{"type":"touch","phase":"moved","nx":0.3,"ack":true}"#.to_string()),
+            WsEvent::Text(r#"{"type":"touch","phase":"ended"}"#.to_string()),
+        ]);
+
+        let texts: Vec<_> = events
+            .into_iter()
+            .filter_map(|event| match event {
+                WsEvent::Text(text) => Some(text),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            texts,
+            vec![
+                r#"{"type":"touch","phase":"began"}"#,
+                r#"{"type":"touch","phase":"moved","nx":0.2}"#,
+                r#"{"type":"touch","phase":"moved","nx":0.3,"ack":true}"#,
+                r#"{"type":"touch","phase":"ended"}"#,
+            ]
+        );
     }
 
     #[test]
@@ -1415,6 +2373,7 @@ mod tests {
             port: 8080,
             quality: 0.7,
             fps: 120,
+            transport: StreamTransport::Jpeg,
             idle_timeout: Duration::from_secs(300),
             slug: "browser".to_string(),
             udid: "UDID-1".to_string(),
@@ -1424,6 +2383,184 @@ mod tests {
         };
         assert!(acquire_controller(&config, 1));
         assert!(!acquire_controller(&config, 2));
+    }
+
+    #[test]
+    fn shared_frame_source_allows_independent_client_cursors() {
+        let received_at = Instant::now();
+        let source = NativeFrameSource::test_with_frame(
+            Arc::new(Mutex::new(StreamStats::default())),
+            7,
+            vec![1, 2, 3, 4],
+            received_at,
+        );
+
+        let first_client = source.latest_frame_after(0).unwrap();
+        let second_client = source.latest_frame_after(0).unwrap();
+
+        assert_eq!(first_client.0, 7);
+        assert_eq!(second_client.0, 7);
+        assert_eq!(first_client.1, vec![1, 2, 3, 4]);
+        assert_eq!(second_client.1, vec![1, 2, 3, 4]);
+        assert_eq!(first_client.2, received_at);
+        assert!(source.latest_frame_after(7).is_none());
+    }
+
+    #[test]
+    fn encoded_frame_source_preserves_h264_metadata() {
+        let received_at = Instant::now();
+        let source = EncodedFrameSource {
+            #[cfg(target_os = "macos")]
+            handle: std::ptr::null_mut(),
+            context: Arc::new(EncodedFrameContext {
+                latest: Mutex::new(LatestEncodedFrame {
+                    generation: 3,
+                    bytes: vec![0, 0, 0, 4, 0x65],
+                    keyframe: true,
+                    pts_ms: 42,
+                    decoder_config: Some(vec![1, 100, 0, 42]),
+                    received_at: Some(received_at),
+                    frames: VecDeque::new(),
+                }),
+                stats: Arc::new(Mutex::new(StreamStats::default())),
+            }),
+        };
+
+        let frame = source.latest_frame_after(2).unwrap();
+
+        assert_eq!(frame.generation, 3);
+        assert_eq!(frame.bytes, vec![0, 0, 0, 4, 0x65]);
+        assert!(frame.keyframe);
+        assert_eq!(frame.pts_ms, 42);
+        assert_eq!(frame.decoder_config, Some(vec![1, 100, 0, 42]));
+        assert_eq!(frame.received_at, received_at);
+        assert!(source.latest_frame_after(3).is_none());
+    }
+
+    #[test]
+    fn encoded_frame_source_prefers_contiguous_frames_and_recovers_at_keyframes() {
+        let received_at = Instant::now();
+        let mut frames = VecDeque::new();
+        frames.push_back(EncodedFrame {
+            generation: 10,
+            bytes: vec![0x01],
+            keyframe: true,
+            pts_ms: 10,
+            decoder_config: Some(vec![1, 100, 0, 42]),
+            received_at,
+        });
+        frames.push_back(EncodedFrame {
+            generation: 11,
+            bytes: vec![0x02],
+            keyframe: false,
+            pts_ms: 11,
+            decoder_config: None,
+            received_at,
+        });
+        frames.push_back(EncodedFrame {
+            generation: 20,
+            bytes: vec![0x03],
+            keyframe: true,
+            pts_ms: 20,
+            decoder_config: Some(vec![1, 100, 0, 42]),
+            received_at,
+        });
+        let source = EncodedFrameSource {
+            #[cfg(target_os = "macos")]
+            handle: std::ptr::null_mut(),
+            context: Arc::new(EncodedFrameContext {
+                latest: Mutex::new(LatestEncodedFrame {
+                    generation: 20,
+                    bytes: vec![0x03],
+                    keyframe: true,
+                    pts_ms: 20,
+                    decoder_config: Some(vec![1, 100, 0, 42]),
+                    received_at: Some(received_at),
+                    frames,
+                }),
+                stats: Arc::new(Mutex::new(StreamStats::default())),
+            }),
+        };
+
+        assert_eq!(source.latest_frame_after(10).unwrap().generation, 11);
+        assert_eq!(source.latest_frame_after(12).unwrap().generation, 20);
+        assert_eq!(source.latest_frame_after(0).unwrap().generation, 20);
+    }
+
+    #[test]
+    fn encoded_frame_source_returns_latest_cached_keyframe() {
+        let received_at = Instant::now();
+        let mut frames = VecDeque::new();
+        frames.push_back(EncodedFrame {
+            generation: 10,
+            bytes: vec![0x01],
+            keyframe: true,
+            pts_ms: 10,
+            decoder_config: Some(vec![1, 0x42, 0xe0, 0x1f]),
+            received_at,
+        });
+        frames.push_back(EncodedFrame {
+            generation: 11,
+            bytes: vec![0x02],
+            keyframe: false,
+            pts_ms: 11,
+            decoder_config: None,
+            received_at,
+        });
+        let source = EncodedFrameSource {
+            #[cfg(target_os = "macos")]
+            handle: std::ptr::null_mut(),
+            context: Arc::new(EncodedFrameContext {
+                latest: Mutex::new(LatestEncodedFrame {
+                    generation: 11,
+                    bytes: vec![0x02],
+                    keyframe: false,
+                    pts_ms: 11,
+                    decoder_config: None,
+                    received_at: Some(received_at),
+                    frames,
+                }),
+                stats: Arc::new(Mutex::new(StreamStats::default())),
+            }),
+        };
+
+        let frame = source.latest_keyframe().unwrap();
+
+        assert_eq!(frame.generation, 10);
+        assert_eq!(frame.bytes, vec![0x01]);
+        assert!(frame.keyframe);
+        assert_eq!(frame.decoder_config, Some(vec![1, 0x42, 0xe0, 0x1f]));
+    }
+
+    #[test]
+    fn h264_frame_message_packs_metadata_and_payload() {
+        let frame = EncodedFrame {
+            generation: 9,
+            bytes: vec![0, 0, 0, 1, 0x65],
+            keyframe: true,
+            pts_ms: 1234,
+            decoder_config: None,
+            received_at: Instant::now(),
+        };
+
+        let message = super::h264_frame_message(&frame);
+
+        assert_eq!(&message[0..4], b"SXH1");
+        assert_eq!(message[4], 1);
+        assert_eq!(u64::from_be_bytes(message[8..16].try_into().unwrap()), 9);
+        assert_eq!(
+            i64::from_be_bytes(message[16..24].try_into().unwrap()),
+            1234
+        );
+        assert_eq!(u32::from_be_bytes(message[24..28].try_into().unwrap()), 5);
+        assert_eq!(&message[28..], &[0, 0, 0, 1, 0x65]);
+    }
+
+    #[test]
+    fn h264_codec_string_uses_avc_decoder_config_profile() {
+        assert_eq!(h264_codec_string(&[1, 0x64, 0x00, 0x2a]), "avc1.64002a");
+        assert_eq!(h264_codec_string(&[1, 0x42, 0xe0, 0x1f]), "avc1.42e01f");
+        assert_eq!(h264_codec_string(&[]), "avc1.64002a");
     }
 
     #[test]
@@ -1454,6 +2591,7 @@ mod tests {
             port: 8080,
             quality: 0.7,
             fps: 120,
+            transport: StreamTransport::Jpeg,
             idle_timeout: Duration::from_secs(300),
             slug: "browser".to_string(),
             udid: "UDID-1".to_string(),
