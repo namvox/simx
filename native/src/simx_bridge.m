@@ -1,14 +1,28 @@
 #import "CoreSimulator.h"
 #import "SimulatorKit.h"
 
+#import <CoreMedia/CoreMedia.h>
 #import <CoreImage/CoreImage.h>
+#import <CoreVideo/CoreVideo.h>
 #import <ImageIO/ImageIO.h>
 #import <IOSurface/IOSurface.h>
+#import <VideoToolbox/VideoToolbox.h>
 #import <dlfcn.h>
 #import <mach/mach_time.h>
 #import <objc/runtime.h>
 
-typedef void (*SimxFrameCallback)(const unsigned char *bytes, unsigned long length, void *context);
+typedef void (*SimxFrameCallback)(const unsigned char *bytes,
+                                  unsigned long length,
+                                  long long encode_latency_ms,
+                                  void *context);
+typedef void (*SimxEncodedFrameCallback)(const unsigned char *bytes,
+                                         unsigned long length,
+                                         int keyframe,
+                                         long long pts_ms,
+                                         const unsigned char *config_bytes,
+                                         unsigned long config_length,
+                                         long long encode_latency_ms,
+                                         void *context);
 typedef IndigoMessage *(*SimxMouseMessageFn)(CGPoint *location, CGPoint *windowLocation, uint32_t target, NSInteger eventType, CGSize displaySize, uint32_t edge);
 typedef IndigoMessage *(*SimxKeyboardMessageFn)(int keyCode, int operation);
 typedef IndigoMessage *(*SimxButtonMessageFn)(uint32_t buttonCode, uint32_t operation, uint32_t target);
@@ -24,6 +38,7 @@ static uint32_t const SimxConsumerControlUsagePage = 0x0c;
 static uint32_t const SimxHomeMenuUsage = 0x40;
 static uint32_t const SimxHomeUsage = 0x65;
 static uint32_t const SimxHomeButtonCode = 0x191;
+static size_t const SimxH264MaxEncodedWidth = 640;
 
 typedef struct {
     BOOL useButtonMessage;
@@ -34,6 +49,13 @@ typedef struct {
 } SimxHomeStrategy;
 
 static void simx_set_error(char **error, NSString *message);
+static uint64_t simx_elapsed_ns(uint64_t startedAt, uint64_t finishedAt);
+static long long simx_elapsed_ms(uint64_t startedAt, uint64_t finishedAt);
+static void simx_h264_output_callback(void *outputCallbackRefCon,
+                                      void *sourceFrameRefCon,
+                                      OSStatus status,
+                                      VTEncodeInfoFlags infoFlags,
+                                      CMSampleBufferRef sampleBuffer);
 
 @interface SimxFrameStreamer : NSObject
 @property (nonatomic, strong) SimDevice *device;
@@ -46,6 +68,16 @@ static void simx_set_error(char **error, NSString *message);
 @property (nonatomic, assign) float quality;
 @property (nonatomic, assign) SimxFrameCallback callback;
 @property (nonatomic, assign) void *callbackContext;
+@property (nonatomic, assign) SimxEncodedFrameCallback encodedCallback;
+@property (nonatomic, assign) void *encodedCallbackContext;
+@property (nonatomic, assign) int targetFPS;
+@property (nonatomic, assign) int bitrate;
+@property (nonatomic, assign) VTCompressionSessionRef compressionSession;
+@property (nonatomic, assign) int64_t videoFrameIndex;
+@property (nonatomic, assign) uint64_t lastH264EncodeAt;
+@property (nonatomic, assign) size_t encodedWidth;
+@property (nonatomic, assign) size_t encodedHeight;
+@property (atomic, assign) BOOL forceKeyframe;
 @property (nonatomic, assign) BOOL stopped;
 @property (nonatomic, strong) id hidClient;
 @property (nonatomic, assign) SimxMouseMessageFn mouseMessage;
@@ -73,6 +105,8 @@ static void simx_set_error(char **error, NSString *message);
     _quality = quality;
     _callback = callback;
     _callbackContext = callbackContext;
+    _targetFPS = 60;
+    _bitrate = 8 * 1000 * 1000;
     _ciContext = [CIContext contextWithOptions:nil];
     _encodeQueue = dispatch_queue_create("simx.frame.encode", DISPATCH_QUEUE_SERIAL);
     return self;
@@ -80,7 +114,7 @@ static void simx_set_error(char **error, NSString *message);
 
 - (void)handleSurface:(IOSurface *)surface
 {
-    if (self.stopped || surface == nil || self.callback == NULL) { return; }
+    if (self.stopped || surface == nil) { return; }
     IOSurface *retainedSurface = surface;
     dispatch_async(self.encodeQueue, ^{
         @try {
@@ -95,6 +129,27 @@ static void simx_set_error(char **error, NSString *message);
                 return;
             }
             self.lastSeed = seed;
+            if (self.encodedCallback != NULL) {
+                uint64_t now = mach_absolute_time();
+                BOOL forceKeyframe = self.forceKeyframe;
+                if (!forceKeyframe && self.lastH264EncodeAt != 0 && self.targetFPS > 0) {
+                    uint64_t maxInputFPS = ((uint64_t)MAX(1, self.targetFPS) * 3) / 2;
+                    uint64_t minIntervalNs = 1000000000ULL / maxInputFPS;
+                    if (simx_elapsed_ns(self.lastH264EncodeAt, now) < minIntervalNs) {
+                        IOSurfaceDecrementUseCount(surfaceRef);
+                        return;
+                    }
+                }
+                self.lastH264EncodeAt = now;
+                [self encodeH264Surface:surfaceRef];
+                IOSurfaceDecrementUseCount(surfaceRef);
+                return;
+            }
+            if (self.callback == NULL) {
+                IOSurfaceDecrementUseCount(surfaceRef);
+                return;
+            }
+            uint64_t encodeStartedAt = mach_absolute_time();
             CIImage *ciImage = [CIImage imageWithIOSurface:surfaceRef];
             if (ciImage == nil) {
                 IOSurfaceDecrementUseCount(surfaceRef);
@@ -116,11 +171,173 @@ static void simx_set_error(char **error, NSString *message);
             CFRelease(destination);
             CGImageRelease(image);
             if (!ok || data.length == 0 || self.stopped) { return; }
-            self.callback((const unsigned char *)data.bytes, (unsigned long)data.length, self.callbackContext);
+            long long encodeLatencyMs = simx_elapsed_ms(encodeStartedAt, mach_absolute_time());
+            self.callback((const unsigned char *)data.bytes,
+                          (unsigned long)data.length,
+                          encodeLatencyMs,
+                          self.callbackContext);
         } @catch (NSException *exception) {
             NSLog(@"simx frame bridge exception: %@", exception);
         }
     });
+}
+
+- (BOOL)ensureCompressionSessionForSurface:(IOSurfaceRef)surfaceRef
+{
+    size_t width = IOSurfaceGetWidth(surfaceRef);
+    size_t height = IOSurfaceGetHeight(surfaceRef);
+    if (width == 0 || height == 0) { return NO; }
+    if (width > SimxH264MaxEncodedWidth) {
+        double scale = (double)SimxH264MaxEncodedWidth / (double)width;
+        width = SimxH264MaxEncodedWidth;
+        height = MAX((size_t)1, (size_t)llround((double)height * scale));
+    }
+    if (self.compressionSession != NULL &&
+        self.encodedWidth == width &&
+        self.encodedHeight == height) {
+        return YES;
+    }
+    if (self.compressionSession != NULL) {
+        VTCompressionSessionCompleteFrames(self.compressionSession, kCMTimeInvalid);
+        VTCompressionSessionInvalidate(self.compressionSession);
+        CFRelease(self.compressionSession);
+        self.compressionSession = NULL;
+        self.videoFrameIndex = 0;
+        self.forceKeyframe = YES;
+    }
+    self.encodedWidth = width;
+    self.encodedHeight = height;
+
+    NSDictionary *encoderSpecification = @{
+        (__bridge NSString *)kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: @YES,
+        (__bridge NSString *)kVTVideoEncoderSpecification_EnableLowLatencyRateControl: @YES,
+    };
+    OSStatus status = VTCompressionSessionCreate(kCFAllocatorDefault,
+                                                 (int32_t)width,
+                                                 (int32_t)height,
+                                                 kCMVideoCodecType_H264,
+                                                 (__bridge CFDictionaryRef)encoderSpecification,
+                                                 NULL,
+                                                 NULL,
+                                                 simx_h264_output_callback,
+                                                 (__bridge void *)self,
+                                                 &_compressionSession);
+    if (status != noErr || self.compressionSession == NULL) {
+        NSLog(@"simx h264 session creation failed: %d", status);
+        return NO;
+    }
+
+    int fps = MAX(1, self.targetFPS);
+    int bitrate = MAX(256 * 1000, self.bitrate);
+    int keyframeInterval = fps * 2;
+    int maxFrameDelay = 0;
+    double keyframeIntervalDuration = 2.0;
+    CFNumberRef fpsNumber = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &fps);
+    CFNumberRef bitrateNumber = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &bitrate);
+    CFNumberRef keyframeNumber = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &keyframeInterval);
+    CFNumberRef maxFrameDelayNumber = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &maxFrameDelay);
+    CFNumberRef keyframeDurationNumber = CFNumberCreate(kCFAllocatorDefault, kCFNumberDoubleType, &keyframeIntervalDuration);
+
+    VTSessionSetProperty(self.compressionSession, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue);
+    VTSessionSetProperty(self.compressionSession, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse);
+    VTSessionSetProperty(self.compressionSession, kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, kCFBooleanTrue);
+    VTSessionSetProperty(self.compressionSession, kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_Baseline_AutoLevel);
+    VTSessionSetProperty(self.compressionSession, kVTCompressionPropertyKey_H264EntropyMode, kVTH264EntropyMode_CAVLC);
+    if (maxFrameDelayNumber != NULL) {
+        VTSessionSetProperty(self.compressionSession, kVTCompressionPropertyKey_MaxFrameDelayCount, maxFrameDelayNumber);
+        CFRelease(maxFrameDelayNumber);
+    }
+    if (fpsNumber != NULL) {
+        VTSessionSetProperty(self.compressionSession, kVTCompressionPropertyKey_ExpectedFrameRate, fpsNumber);
+        CFRelease(fpsNumber);
+    }
+    if (bitrateNumber != NULL) {
+        VTSessionSetProperty(self.compressionSession, kVTCompressionPropertyKey_AverageBitRate, bitrateNumber);
+        CFRelease(bitrateNumber);
+    }
+    if (keyframeNumber != NULL) {
+        VTSessionSetProperty(self.compressionSession, kVTCompressionPropertyKey_MaxKeyFrameInterval, keyframeNumber);
+        CFRelease(keyframeNumber);
+    }
+    if (keyframeDurationNumber != NULL) {
+        VTSessionSetProperty(self.compressionSession, kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, keyframeDurationNumber);
+        CFRelease(keyframeDurationNumber);
+    }
+    VTCompressionSessionPrepareToEncodeFrames(self.compressionSession);
+    return YES;
+}
+
+- (void)encodeH264Surface:(IOSurfaceRef)surfaceRef
+{
+    if (![self ensureCompressionSessionForSurface:surfaceRef]) { return; }
+    uint64_t encodeStartedAtValue = mach_absolute_time();
+    size_t sourceWidth = IOSurfaceGetWidth(surfaceRef);
+    size_t sourceHeight = IOSurfaceGetHeight(surfaceRef);
+    CVPixelBufferRef pixelBuffer = NULL;
+    if (self.encodedWidth > 0 &&
+        self.encodedHeight > 0 &&
+        (self.encodedWidth != sourceWidth || self.encodedHeight != sourceHeight)) {
+        NSDictionary *attributes = @{
+            (__bridge NSString *)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
+            (__bridge NSString *)kCVPixelBufferWidthKey: @(self.encodedWidth),
+            (__bridge NSString *)kCVPixelBufferHeightKey: @(self.encodedHeight),
+            (__bridge NSString *)kCVPixelBufferIOSurfacePropertiesKey: @{},
+        };
+        CVReturn pixelStatus = CVPixelBufferCreate(kCFAllocatorDefault,
+                                                   self.encodedWidth,
+                                                   self.encodedHeight,
+                                                   kCVPixelFormatType_32BGRA,
+                                                   (__bridge CFDictionaryRef)attributes,
+                                                   &pixelBuffer);
+        if (pixelStatus != kCVReturnSuccess || pixelBuffer == NULL) {
+            NSLog(@"simx h264 scaled pixel buffer creation failed: %d", pixelStatus);
+            return;
+        }
+        CIImage *sourceImage = [CIImage imageWithIOSurface:surfaceRef];
+        if (sourceImage == nil) {
+            CFRelease(pixelBuffer);
+            return;
+        }
+        CGFloat scaleX = (CGFloat)self.encodedWidth / (CGFloat)sourceWidth;
+        CGFloat scaleY = (CGFloat)self.encodedHeight / (CGFloat)sourceHeight;
+        CIImage *scaledImage = [sourceImage imageByApplyingTransform:CGAffineTransformMakeScale(scaleX, scaleY)];
+        CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+        [self.ciContext render:scaledImage
+               toCVPixelBuffer:pixelBuffer
+                         bounds:CGRectMake(0, 0, self.encodedWidth, self.encodedHeight)
+                    colorSpace:colorSpace];
+        if (colorSpace != NULL) { CGColorSpaceRelease(colorSpace); }
+    } else {
+        CVReturn pixelStatus = CVPixelBufferCreateWithIOSurface(kCFAllocatorDefault, surfaceRef, NULL, &pixelBuffer);
+        if (pixelStatus != kCVReturnSuccess || pixelBuffer == NULL) {
+            NSLog(@"simx h264 pixel buffer creation failed: %d", pixelStatus);
+            return;
+        }
+    }
+
+    CMTime pts = CMTimeMake(self.videoFrameIndex, MAX(1, self.targetFPS));
+    self.videoFrameIndex += 1;
+    uint64_t *encodeStartedAt = malloc(sizeof(uint64_t));
+    if (encodeStartedAt != NULL) {
+        *encodeStartedAt = encodeStartedAtValue;
+    }
+    NSDictionary *frameProperties = nil;
+    if (self.forceKeyframe) {
+        self.forceKeyframe = NO;
+        frameProperties = @{(__bridge NSString *)kVTEncodeFrameOptionKey_ForceKeyFrame: @YES};
+    }
+    OSStatus status = VTCompressionSessionEncodeFrame(self.compressionSession,
+                                                      pixelBuffer,
+                                                      pts,
+                                                      kCMTimeInvalid,
+                                                      (__bridge CFDictionaryRef)frameProperties,
+                                                      encodeStartedAt,
+                                                      NULL);
+    CFRelease(pixelBuffer);
+    if (status != noErr) {
+        if (encodeStartedAt != NULL) { free(encodeStartedAt); }
+        NSLog(@"simx h264 encode failed: %d", status);
+    }
 }
 
 - (void)stop
@@ -140,6 +357,12 @@ static void simx_set_error(char **error, NSString *message);
     }
     if ([surfaceObject respondsToSelector:@selector(unregisterDamageRectanglesCallbackWithUUID:)]) {
         [surfaceObject unregisterDamageRectanglesCallbackWithUUID:self.uuid];
+    }
+    if (self.compressionSession != NULL) {
+        VTCompressionSessionCompleteFrames(self.compressionSession, kCMTimeInvalid);
+        VTCompressionSessionInvalidate(self.compressionSession);
+        CFRelease(self.compressionSession);
+        self.compressionSession = NULL;
     }
 }
 
@@ -305,8 +528,117 @@ static void simx_set_error(char **error, NSString *message) {
     if (error != NULL) { *error = simx_strdup(message); }
 }
 
+static uint64_t simx_elapsed_ns(uint64_t startedAt, uint64_t finishedAt) {
+    static mach_timebase_info_data_t timebase;
+    if (timebase.denom == 0) {
+        mach_timebase_info(&timebase);
+    }
+    uint64_t elapsed = finishedAt >= startedAt ? finishedAt - startedAt : 0;
+    return elapsed * timebase.numer / timebase.denom;
+}
+
+static long long simx_elapsed_ms(uint64_t startedAt, uint64_t finishedAt) {
+    return (long long)(simx_elapsed_ns(startedAt, finishedAt) / 1000000);
+}
+
 void simx_bridge_free_string(char *value) {
     if (value != NULL) { free(value); }
+}
+
+static void simx_h264_output_callback(void *outputCallbackRefCon,
+                                      void *sourceFrameRefCon,
+                                      OSStatus status,
+                                      VTEncodeInfoFlags infoFlags,
+                                      CMSampleBufferRef sampleBuffer)
+{
+    (void)infoFlags;
+    uint64_t encodeStartedAt = 0;
+    if (sourceFrameRefCon != NULL) {
+        encodeStartedAt = *((uint64_t *)sourceFrameRefCon);
+        free(sourceFrameRefCon);
+    }
+    long long encodeLatencyMs = encodeStartedAt != 0 ? simx_elapsed_ms(encodeStartedAt, mach_absolute_time()) : -1;
+    if (status != noErr || sampleBuffer == NULL || !CMSampleBufferDataIsReady(sampleBuffer)) {
+        return;
+    }
+
+    SimxFrameStreamer *streamer = (__bridge SimxFrameStreamer *)outputCallbackRefCon;
+    if (streamer == nil || streamer.stopped || streamer.encodedCallback == NULL) {
+        return;
+    }
+
+    CMBlockBufferRef blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer);
+    if (blockBuffer == NULL) { return; }
+
+    size_t lengthAtOffset = 0;
+    size_t totalLength = 0;
+    char *dataPointer = NULL;
+    OSStatus blockStatus = CMBlockBufferGetDataPointer(blockBuffer, 0, &lengthAtOffset, &totalLength, &dataPointer);
+    if (blockStatus != noErr || dataPointer == NULL || totalLength == 0) {
+        return;
+    }
+
+    BOOL keyframe = YES;
+    CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, false);
+    if (attachments != NULL && CFArrayGetCount(attachments) > 0) {
+        CFDictionaryRef attachment = CFArrayGetValueAtIndex(attachments, 0);
+        keyframe = !CFDictionaryContainsKey(attachment, kCMSampleAttachmentKey_NotSync);
+    }
+
+    CMTime pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
+    long long ptsMs = CMTIME_IS_VALID(pts) ? (long long)(CMTimeGetSeconds(pts) * 1000.0) : 0;
+    NSMutableData *decoderConfig = nil;
+    if (keyframe) {
+        CMFormatDescriptionRef format = CMSampleBufferGetFormatDescription(sampleBuffer);
+        const uint8_t *sps = NULL;
+        const uint8_t *pps = NULL;
+        size_t spsLength = 0;
+        size_t ppsLength = 0;
+        size_t parameterSetCount = 0;
+        int nalUnitHeaderLength = 0;
+        OSStatus spsStatus = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(format,
+                                                                                0,
+                                                                                &sps,
+                                                                                &spsLength,
+                                                                                &parameterSetCount,
+                                                                                &nalUnitHeaderLength);
+        OSStatus ppsStatus = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(format,
+                                                                                1,
+                                                                                &pps,
+                                                                                &ppsLength,
+                                                                                NULL,
+                                                                                NULL);
+        if (spsStatus == noErr && ppsStatus == noErr && sps != NULL && pps != NULL && spsLength >= 4 && ppsLength > 0) {
+            decoderConfig = [NSMutableData data];
+            uint8_t header[] = {
+                1,
+                sps[1],
+                sps[2],
+                sps[3],
+                0xff,
+                0xe1,
+                (uint8_t)((spsLength >> 8) & 0xff),
+                (uint8_t)(spsLength & 0xff),
+            };
+            [decoderConfig appendBytes:header length:sizeof(header)];
+            [decoderConfig appendBytes:sps length:spsLength];
+            uint8_t ppsHeader[] = {
+                1,
+                (uint8_t)((ppsLength >> 8) & 0xff),
+                (uint8_t)(ppsLength & 0xff),
+            };
+            [decoderConfig appendBytes:ppsHeader length:sizeof(ppsHeader)];
+            [decoderConfig appendBytes:pps length:ppsLength];
+        }
+    }
+    streamer.encodedCallback((const unsigned char *)dataPointer,
+                             (unsigned long)totalLength,
+                             keyframe ? 1 : 0,
+                             ptsMs,
+                             decoderConfig.length > 0 ? (const unsigned char *)decoderConfig.bytes : NULL,
+                             (unsigned long)decoderConfig.length,
+                             encodeLatencyMs,
+                             streamer.encodedCallbackContext);
 }
 
 void *simx_frame_stream_start(const char *developer_dir,
@@ -314,11 +646,15 @@ void *simx_frame_stream_start(const char *developer_dir,
                               float quality,
                               SimxFrameCallback callback,
                               void *callback_context,
+                              int target_fps,
+                              int bitrate,
+                              SimxEncodedFrameCallback encoded_callback,
+                              void *encoded_callback_context,
                               char **error)
 {
     @autoreleasepool {
-        if (callback == NULL) {
-            simx_set_error(error, @"Frame callback was NULL.");
+        if (callback == NULL && encoded_callback == NULL) {
+            simx_set_error(error, @"Frame or encoded callback is required.");
             return NULL;
         }
 
@@ -431,6 +767,10 @@ void *simx_frame_stream_start(const char *developer_dir,
                                                                        callback:callback
                                                                 callbackContext:callback_context];
         streamer.hidClient = hidClient;
+        streamer.targetFPS = target_fps > 0 ? target_fps : 60;
+        streamer.bitrate = bitrate > 0 ? bitrate : 8 * 1000 * 1000;
+        streamer.encodedCallback = encoded_callback;
+        streamer.encodedCallbackContext = encoded_callback_context;
         streamer.mouseMessage = (SimxMouseMessageFn)dlsym(simKitHandle, "IndigoHIDMessageForMouseNSEvent");
         streamer.keyboardMessage = (SimxKeyboardMessageFn)dlsym(simKitHandle, "IndigoHIDMessageForKeyboardArbitrary");
         streamer.buttonMessage = (SimxButtonMessageFn)dlsym(simKitHandle, "IndigoHIDMessageForButton");
@@ -487,6 +827,22 @@ void simx_frame_stream_stop(void *handle)
     @autoreleasepool {
         SimxFrameStreamer *streamer = (__bridge_transfer SimxFrameStreamer *)handle;
         [streamer stop];
+    }
+}
+
+int simx_stream_request_keyframe(void *handle, char **error)
+{
+    if (handle == NULL) {
+        simx_set_error(error, @"Native stream handle was NULL.");
+        return 0;
+    }
+    @try {
+        SimxFrameStreamer *streamer = (__bridge SimxFrameStreamer *)handle;
+        streamer.forceKeyframe = YES;
+        return 1;
+    } @catch (NSException *exception) {
+        simx_set_error(error, [NSString stringWithFormat:@"SimulatorKit keyframe request exception: %@", exception.reason ?: exception.name]);
+        return 0;
     }
 }
 
