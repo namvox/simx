@@ -42,9 +42,13 @@ This milestone is complete only when all checks below pass.
 ## Multi-Client Behavior
 
 - Multiple clients may connect to the same stream.
-- The first WebSocket client is controller.
-- Later WebSocket clients are viewer-only.
-- Viewer-only input with `ack: true` receives a negative acknowledgement.
+- Default `--control-mode read-only` clients are viewer-only.
+- Read-only input with `ack: true` receives a negative acknowledgement.
+- `--control-mode single-controller` makes the first WebSocket client controller
+  and later clients viewer-only.
+- `--control-mode claim` lets any connected WebSocket client claim HID write
+  permission with `type: "claimControl"`.
+- `--control-mode shared` allows every WebSocket client to send HID input.
 
 ## HID v2
 

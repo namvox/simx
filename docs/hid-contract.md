@@ -278,27 +278,76 @@ If a viewer-only client sends input while another client owns control, the serve
 }
 ```
 
+If the stream was started in the default read-only control mode and a client sends
+input with `ack: true`, the server replies:
+
+```json
+{
+  "type": "ack",
+  "id": "paste-1",
+  "ok": false,
+  "message": "stream is read-only"
+}
+```
+
 ## Multi-Client Control
 
-Multiple clients can connect to one stream. The first WebSocket client becomes the controller and may send HID input. Later clients are viewers and receive frames but cannot control the simulator until the controller disconnects and they reconnect.
+Multiple clients can connect to one stream. `simx serve` and
+`simx lease --serve` default to `--control-mode read-only`, where all clients
+receive frames and no client may send HID input. Start the server with an
+explicit write mode when browser control is required:
+
+```sh
+simx serve --slug browser-preview --control-mode single-controller
+simx serve --slug browser-preview --control-mode claim
+simx serve --slug browser-preview --control-mode shared
+```
+
+In `single-controller` mode, the first WebSocket client becomes the controller
+and may send HID input. Later clients are viewers and receive frames but cannot
+control the simulator until the controller disconnects and they reconnect.
+
+In `claim` mode, clients start as viewers and any connected client may claim
+write permission:
+
+```json
+{
+  "type": "claimControl",
+  "id": "claim-1",
+  "ack": true
+}
+```
+
+The claiming client receives an updated role message:
+
+```json
+{ "type": "client", "role": "controller", "controlMode": "claim" }
+```
+
+A later `claimControl` message from another client transfers write permission to
+that client.
+
+In `shared` mode, every connected WebSocket client may send HID input.
 
 The server sends a role message on connect:
 
 ```json
-{ "type": "client", "role": "controller" }
+{ "type": "client", "role": "controller", "controlMode": "single-controller" }
 ```
 
 or:
 
 ```json
-{ "type": "client", "role": "viewer" }
+{ "type": "client", "role": "viewer", "controlMode": "read-only" }
 ```
 
 ## Error Handling
 
 The server currently logs malformed JSON, unsupported key codes, or native HID failures to stderr and keeps the WebSocket open when possible.
 
-The server does not currently send per-input success or error acknowledgements to the browser. Clients should treat the stream as best-effort input transport and use the incoming JPEG frames to observe effects.
+Input messages that include `ack: true` receive best-effort success or error
+acknowledgements. Messages without `ack: true` remain best-effort; clients should
+use the incoming stream frames to observe effects.
 
 ## Compatibility Notes
 

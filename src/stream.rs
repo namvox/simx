@@ -29,12 +29,63 @@ pub struct ServeConfig {
     pub quality: f32,
     pub fps: u32,
     pub transport: StreamTransport,
+    pub control_mode: StreamControlMode,
     pub idle_timeout: Duration,
     pub slug: String,
     pub udid: String,
     pub state_path: std::path::PathBuf,
     pub stats: Arc<Mutex<StreamStats>>,
     pub controllers: Arc<Mutex<Option<u64>>>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StreamControlMode {
+    #[default]
+    ReadOnly,
+    SingleController,
+    Claim,
+    Shared,
+}
+
+impl StreamControlMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read-only",
+            Self::SingleController => "single-controller",
+            Self::Claim => "claim",
+            Self::Shared => "shared",
+        }
+    }
+
+    fn client_role(self, is_controller: bool) -> &'static str {
+        match self {
+            Self::ReadOnly => "viewer",
+            Self::SingleController if is_controller => "controller",
+            Self::SingleController => "viewer",
+            Self::Claim if is_controller => "controller",
+            Self::Claim => "viewer",
+            Self::Shared => "controller",
+        }
+    }
+
+    fn can_send_input(self, config: &ServeConfig, client_id: u64, is_controller: bool) -> bool {
+        match self {
+            Self::ReadOnly => false,
+            Self::SingleController => is_controller,
+            Self::Claim => current_controller(config) == Some(client_id),
+            Self::Shared => true,
+        }
+    }
+
+    fn denied_message(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "stream is read-only",
+            Self::SingleController => "client is viewer-only",
+            Self::Claim => "write permission has not been claimed",
+            Self::Shared => "ok",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -283,7 +334,9 @@ fn stream_frames(
     frame_source: Arc<NativeFrameSource>,
 ) -> anyhow::Result<()> {
     let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
-    let is_controller = acquire_controller(&config, client_id);
+    let is_controller = config.control_mode == StreamControlMode::SingleController
+        && acquire_controller(&config, client_id);
+    let role = config.control_mode.client_role(is_controller);
     let frame_interval = Duration::from_secs_f64(1.0 / config.fps as f64);
     let mut last_lease_check = Instant::now();
     let mut last_activity = Instant::now();
@@ -295,22 +348,29 @@ fn stream_frames(
         stats.connected_clients = stats.connected_clients.saturating_add(1);
         stats.target_fps = config.fps;
         stats.paused = false;
-        stats.controller_connected = is_controller;
+        stats.controller_connected = match config.control_mode {
+            StreamControlMode::ReadOnly => false,
+            StreamControlMode::SingleController => stats.controller_connected || is_controller,
+            StreamControlMode::Claim => stats.controller_connected,
+            StreamControlMode::Shared => true,
+        };
     });
-    let _client_stats = ClientStatsGuard::new(config.stats.clone());
+    let _client_stats = ClientStatsGuard::new(
+        config.stats.clone(),
+        config.control_mode == StreamControlMode::Shared,
+    );
     let _controller = ControllerGuard::new(
         config.controllers.clone(),
         config.stats.clone(),
         client_id,
-        is_controller,
+        is_controller || config.control_mode == StreamControlMode::Claim,
     );
     write_ws_text(
         &mut stream,
-        if is_controller {
-            r#"{"type":"client","role":"controller"}"#
-        } else {
-            r#"{"type":"client","role":"viewer"}"#
-        },
+        &format!(
+            r#"{{"type":"client","role":"{role}","controlMode":"{}"}}"#,
+            config.control_mode.as_str()
+        ),
     )?;
     loop {
         let events = coalesce_touch_move_events(read_ws_events(&mut stream, &mut input_buffer));
@@ -324,7 +384,19 @@ fn stream_frames(
                         last_activity = Instant::now();
                         update_stats(&config, |stats| stats.paused = false);
                         write_ws_text(&mut stream, r#"{"type":"resumed"}"#)?;
-                    } else if is_controller {
+                    } else if is_claim_control_message(&text)
+                        && config.control_mode == StreamControlMode::Claim
+                    {
+                        claim_controller(&config, client_id);
+                        last_activity = Instant::now();
+                        write_client_message(&mut stream, &config, "controller", None)?;
+                        if let Some(ack) = input_ack(&text, true, "ok") {
+                            write_ws_text(&mut stream, &ack)?;
+                        }
+                    } else if config
+                        .control_mode
+                        .can_send_input(&config, client_id, is_controller)
+                    {
                         last_activity = Instant::now();
                         match frame_source.handle_input(&text) {
                             Ok(acks) => {
@@ -340,7 +412,9 @@ fn stream_frames(
                             }
                         }
                     } else {
-                        if let Some(ack) = input_ack(&text, false, "client is viewer-only") {
+                        if let Some(ack) =
+                            input_ack(&text, false, config.control_mode.denied_message())
+                        {
                             write_ws_text(&mut stream, &ack)?;
                         }
                     }
@@ -445,7 +519,9 @@ fn stream_h264_frames(
     encoded_source: Arc<EncodedFrameSource>,
 ) -> anyhow::Result<()> {
     let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
-    let is_controller = acquire_controller(&config, client_id);
+    let is_controller = config.control_mode == StreamControlMode::SingleController
+        && acquire_controller(&config, client_id);
+    let role = config.control_mode.client_role(is_controller);
     let frame_interval = Duration::from_secs_f64(1.0 / config.fps as f64);
     let mut last_lease_check = Instant::now();
     let mut last_activity = Instant::now();
@@ -458,22 +534,29 @@ fn stream_h264_frames(
         stats.connected_clients = stats.connected_clients.saturating_add(1);
         stats.target_fps = config.fps;
         stats.paused = false;
-        stats.controller_connected = is_controller;
+        stats.controller_connected = match config.control_mode {
+            StreamControlMode::ReadOnly => false,
+            StreamControlMode::SingleController => stats.controller_connected || is_controller,
+            StreamControlMode::Claim => stats.controller_connected,
+            StreamControlMode::Shared => true,
+        };
     });
-    let _client_stats = ClientStatsGuard::new(config.stats.clone());
+    let _client_stats = ClientStatsGuard::new(
+        config.stats.clone(),
+        config.control_mode == StreamControlMode::Shared,
+    );
     let _controller = ControllerGuard::new(
         config.controllers.clone(),
         config.stats.clone(),
         client_id,
-        is_controller,
+        is_controller || config.control_mode == StreamControlMode::Claim,
     );
     write_ws_text(
         &mut stream,
-        if is_controller {
-            r#"{"type":"client","role":"controller","transport":"h264"}"#
-        } else {
-            r#"{"type":"client","role":"viewer","transport":"h264"}"#
-        },
+        &format!(
+            r#"{{"type":"client","role":"{role}","transport":"h264","controlMode":"{}"}}"#,
+            config.control_mode.as_str()
+        ),
     )?;
     if let Err(error) = encoded_source.request_keyframe() {
         eprintln!("keyframe request error: {error:#}");
@@ -520,7 +603,19 @@ fn stream_h264_frames(
                         if let Some(ack) = input_ack(&text, true, "ok") {
                             write_ws_text(&mut stream, &ack)?;
                         }
-                    } else if is_controller {
+                    } else if is_claim_control_message(&text)
+                        && config.control_mode == StreamControlMode::Claim
+                    {
+                        claim_controller(&config, client_id);
+                        last_activity = Instant::now();
+                        write_client_message(&mut stream, &config, "controller", Some("h264"))?;
+                        if let Some(ack) = input_ack(&text, true, "ok") {
+                            write_ws_text(&mut stream, &ack)?;
+                        }
+                    } else if config
+                        .control_mode
+                        .can_send_input(&config, client_id, is_controller)
+                    {
                         last_activity = Instant::now();
                         match encoded_source.handle_hid_input(&text) {
                             Ok(acks) => {
@@ -535,7 +630,9 @@ fn stream_h264_frames(
                                 eprintln!("input error: {error:#}");
                             }
                         }
-                    } else if let Some(ack) = input_ack(&text, false, "client is viewer-only") {
+                    } else if let Some(ack) =
+                        input_ack(&text, false, config.control_mode.denied_message())
+                    {
                         write_ws_text(&mut stream, &ack)?;
                     }
                 }
@@ -659,13 +756,35 @@ fn send_h264_frame(
     Ok(())
 }
 
+fn write_client_message(
+    stream: &mut TcpStream,
+    config: &ServeConfig,
+    role: &str,
+    transport: Option<&str>,
+) -> anyhow::Result<()> {
+    let transport_field = transport
+        .map(|transport| format!(r#","transport":"{transport}""#))
+        .unwrap_or_default();
+    write_ws_text(
+        stream,
+        &format!(
+            r#"{{"type":"client","role":"{role}"{transport_field},"controlMode":"{}"}}"#,
+            config.control_mode.as_str()
+        ),
+    )
+}
+
 struct ClientStatsGuard {
     stats: Arc<Mutex<StreamStats>>,
+    clear_controller_when_empty: bool,
 }
 
 impl ClientStatsGuard {
-    fn new(stats: Arc<Mutex<StreamStats>>) -> Self {
-        Self { stats }
+    fn new(stats: Arc<Mutex<StreamStats>>, clear_controller_when_empty: bool) -> Self {
+        Self {
+            stats,
+            clear_controller_when_empty,
+        }
     }
 }
 
@@ -675,6 +794,9 @@ impl Drop for ClientStatsGuard {
             stats.connected_clients = stats.connected_clients.saturating_sub(1);
             if stats.connected_clients == 0 {
                 stats.paused = false;
+                if self.clear_controller_when_empty {
+                    stats.controller_connected = false;
+                }
             }
         }
     }
@@ -727,6 +849,23 @@ fn acquire_controller(config: &ServeConfig, client_id: u64) -> bool {
         }
     }
     false
+}
+
+fn claim_controller(config: &ServeConfig, client_id: u64) {
+    if let Ok(mut controller) = config.controllers.lock() {
+        *controller = Some(client_id);
+    }
+    update_stats(config, |stats| {
+        stats.controller_connected = true;
+    });
+}
+
+fn current_controller(config: &ServeConfig) -> Option<u64> {
+    config
+        .controllers
+        .lock()
+        .ok()
+        .and_then(|controller| *controller)
 }
 
 fn snapshot_stats(config: &ServeConfig) -> StreamStats {
@@ -2189,6 +2328,18 @@ fn is_resume_message(text: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn is_claim_control_message(text: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("type")
+                .and_then(|value| value.as_str())
+                .map(|message_type| message_type == "claimControl")
+        })
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -2196,12 +2347,12 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        acquire_controller, char_to_hid, h264_codec_string, h264_stream_path, input_ack,
-        is_keyframe_request_message, is_resume_message, is_unacknowledged_touch_move,
-        lease_is_active, long_press_scroll_plan, parse_next_ws_event, slug_path, slug_path_slash,
-        stats_path, stream_path, websocket_accept, EncodedFrame, EncodedFrameContext,
-        EncodedFrameSource, LatestEncodedFrame, NativeFrameSource, ServeConfig, StreamStats,
-        StreamTransport, WsEvent,
+        acquire_controller, char_to_hid, claim_controller, h264_codec_string, h264_stream_path,
+        input_ack, is_claim_control_message, is_keyframe_request_message, is_resume_message,
+        is_unacknowledged_touch_move, lease_is_active, long_press_scroll_plan, parse_next_ws_event,
+        slug_path, slug_path_slash, stats_path, stream_path, websocket_accept, EncodedFrame,
+        EncodedFrameContext, EncodedFrameSource, LatestEncodedFrame, NativeFrameSource,
+        ServeConfig, StreamControlMode, StreamStats, StreamTransport, WsEvent,
     };
     use serde_json::json;
     use tempfile::TempDir;
@@ -2261,6 +2412,15 @@ mod tests {
         ));
         assert!(!is_keyframe_request_message(r#"{"type":"resume"}"#));
         assert!(!is_keyframe_request_message("not-json"));
+    }
+
+    #[test]
+    fn detects_claim_control_messages() {
+        assert!(is_claim_control_message(
+            r#"{"type":"claimControl","ack":true}"#
+        ));
+        assert!(!is_claim_control_message(r#"{"type":"resume"}"#));
+        assert!(!is_claim_control_message("not-json"));
     }
 
     #[test]
@@ -2374,6 +2534,7 @@ mod tests {
             quality: 0.7,
             fps: 120,
             transport: StreamTransport::Jpeg,
+            control_mode: StreamControlMode::SingleController,
             idle_timeout: Duration::from_secs(300),
             slug: "browser".to_string(),
             udid: "UDID-1".to_string(),
@@ -2383,6 +2544,40 @@ mod tests {
         };
         assert!(acquire_controller(&config, 1));
         assert!(!acquire_controller(&config, 2));
+    }
+
+    #[test]
+    fn control_modes_authorize_input_as_expected() {
+        let mut config = test_serve_config(StreamControlMode::Claim);
+        assert!(!StreamControlMode::ReadOnly.can_send_input(&config, 1, true));
+        assert!(!StreamControlMode::ReadOnly.can_send_input(&config, 1, false));
+        assert!(StreamControlMode::SingleController.can_send_input(&config, 1, true));
+        assert!(!StreamControlMode::SingleController.can_send_input(&config, 2, false));
+        assert!(!StreamControlMode::Claim.can_send_input(&config, 1, false));
+        claim_controller(&config, 2);
+        assert!(!StreamControlMode::Claim.can_send_input(&config, 1, false));
+        assert!(StreamControlMode::Claim.can_send_input(&config, 2, false));
+        assert!(StreamControlMode::Shared.can_send_input(&config, 1, true));
+        assert!(StreamControlMode::Shared.can_send_input(&config, 2, false));
+        config.control_mode = StreamControlMode::ReadOnly;
+    }
+
+    #[test]
+    fn control_modes_report_client_roles() {
+        assert_eq!(StreamControlMode::ReadOnly.client_role(true), "viewer");
+        assert_eq!(StreamControlMode::ReadOnly.client_role(false), "viewer");
+        assert_eq!(
+            StreamControlMode::SingleController.client_role(true),
+            "controller"
+        );
+        assert_eq!(
+            StreamControlMode::SingleController.client_role(false),
+            "viewer"
+        );
+        assert_eq!(StreamControlMode::Claim.client_role(true), "controller");
+        assert_eq!(StreamControlMode::Claim.client_role(false), "viewer");
+        assert_eq!(StreamControlMode::Shared.client_role(true), "controller");
+        assert_eq!(StreamControlMode::Shared.client_role(false), "controller");
     }
 
     #[test]
@@ -2592,6 +2787,7 @@ mod tests {
             quality: 0.7,
             fps: 120,
             transport: StreamTransport::Jpeg,
+            control_mode: StreamControlMode::ReadOnly,
             idle_timeout: Duration::from_secs(300),
             slug: "browser".to_string(),
             udid: "UDID-1".to_string(),
@@ -2615,6 +2811,23 @@ mod tests {
             frame.push(byte ^ mask[index % 4]);
         }
         frame
+    }
+
+    fn test_serve_config(control_mode: StreamControlMode) -> ServeConfig {
+        ServeConfig {
+            host: "127.0.0.1".to_string(),
+            port: 8080,
+            quality: 0.7,
+            fps: 120,
+            transport: StreamTransport::Jpeg,
+            control_mode,
+            idle_timeout: Duration::from_secs(300),
+            slug: "browser".to_string(),
+            udid: "UDID-1".to_string(),
+            state_path: TempDir::new().unwrap().path().join("pool.json"),
+            stats: Arc::new(Mutex::new(StreamStats::default())),
+            controllers: Arc::new(Mutex::new(None)),
+        }
     }
 
     fn assert_float_eq(actual: f64, expected: f64) {

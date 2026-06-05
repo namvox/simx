@@ -12,10 +12,14 @@
     .screen { position: relative; overflow: hidden; border-radius: 34px; background: #050608; aspect-ratio: 1170 / 2532; outline: none; touch-action: none; }
     .screen:focus { box-shadow: 0 0 0 3px #f2b36d; }
     img, canvas { display: block; width: 100%; height: 100%; object-fit: contain; -webkit-user-drag: none; user-select: none; }
+    .permission { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 2; max-width: calc(100% - 32px); padding: 7px 11px; border-radius: 999px; background: rgba(17, 19, 24, 0.86); color: #f5f7fb; border: 1px solid rgba(255, 255, 255, 0.18); font-size: 12px; font-weight: 700; line-height: 1.2; text-align: center; white-space: nowrap; pointer-events: none; backdrop-filter: blur(12px); }
+    .permission[data-mode="write"] { background: rgba(23, 92, 58, 0.88); border-color: rgba(136, 226, 176, 0.36); }
+    .permission[data-mode="read"] { background: rgba(105, 65, 21, 0.9); border-color: rgba(242, 179, 109, 0.42); }
     [hidden] { display: none !important; }
     .status { font-size: 13px; color: #b9c0cc; }
     button { appearance: none; border: 0; border-radius: 999px; padding: 9px 14px; background: #f2b36d; color: #15110c; font-weight: 700; }
     button[hidden] { display: none; }
+    .actions { min-height: 37px; display: flex; gap: 8px; align-items: center; justify-content: center; }
   </style>
 </head>
 <body>
@@ -24,19 +28,25 @@
       <div id="screen" class="screen" tabindex="0">
         <img id="frame" alt="Simulator stream">
         <canvas id="video" hidden></canvas>
+        <div id="permission" class="permission" data-mode="read">Connecting...</div>
       </div>
     </div>
     <div id="status" class="status">Connecting...</div>
     <pre id="metrics" hidden>{}</pre>
-    <button id="resume" hidden>Resume</button>
+    <div class="actions">
+      <button id="claim" hidden>Claim Write</button>
+      <button id="resume" hidden>Resume</button>
+    </div>
   </main>
   <script>
     const statusEl = document.getElementById("status");
     const frameEl = document.getElementById("frame");
     const videoEl = document.getElementById("video");
     const screenEl = document.getElementById("screen");
+    const claimEl = document.getElementById("claim");
     const resumeEl = document.getElementById("resume");
     const metricsEl = document.getElementById("metrics");
+    const permissionEl = document.getElementById("permission");
     const params = new URLSearchParams(location.search);
     const defaultTransport = "__SIMX_TRANSPORT__";
     const transport = params.get("transport") === "h264" || (!params.has("transport") && defaultTransport === "h264") ? "h264" : "jpeg";
@@ -47,6 +57,9 @@
     let activePointerId = null;
     let lastPoint = null;
     let activeTouchTimer = null;
+    let canSendInput = false;
+    let controlMode = "read-only";
+    let clientRole = "viewer";
     let decoder;
     let awaitingKeyframe = true;
     const metrics = {
@@ -110,6 +123,32 @@
     setInterval(flushMetrics, 1000);
 
     function setStatus(text) { statusEl.textContent = text; }
+    function setPermission(message, writable) {
+      permissionEl.textContent = message;
+      permissionEl.dataset.mode = writable ? "write" : "read";
+    }
+    function updateClaimButton() {
+      claimEl.hidden = !(controlMode === "claim" && !canSendInput);
+    }
+    function updatePermission(message) {
+      controlMode = message.controlMode || controlMode;
+      clientRole = message.role || clientRole;
+      canSendInput = clientRole === "controller";
+      if (controlMode === "shared" && canSendInput) {
+        setPermission("Shared write access", true);
+      } else if (controlMode === "claim" && canSendInput) {
+        setPermission("Write access claimed", true);
+      } else if (controlMode === "claim") {
+        setPermission("Claim write access", false);
+      } else if (controlMode === "single-controller" && canSendInput) {
+        setPermission("Write access", true);
+      } else if (controlMode === "single-controller") {
+        setPermission("Viewer only", false);
+      } else {
+        setPermission("Read-only", false);
+      }
+      updateClaimButton();
+    }
     function send(payload) {
       if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload));
     }
@@ -127,6 +166,9 @@
       setStatus("Resuming...");
       send({ type: "resume" });
       requestKeyframe("resume");
+    }
+    function claimWriteAccess() {
+      send({ type: "claimControl", ack: true, id: `claim-${Date.now()}` });
     }
     function bytesFromBase64(value) {
       const binary = atob(value);
@@ -242,6 +284,7 @@
       };
     }
     function sendTouch(phase, point) {
+      if (!canSendInput) return;
       send({
         type: "touch",
         phase,
@@ -302,6 +345,12 @@
               paused = false;
               resumeEl.hidden = true;
               setStatus("Live");
+            } else if (message.type === "client") {
+              updatePermission(message);
+            } else if (message.type === "ack" && message.ok === true && String(message.id || "").startsWith("claim-")) {
+              setStatus("Write access claimed");
+            } else if (message.type === "ack" && message.ok === false) {
+              setStatus(message.message || "Input rejected");
             } else if (message.type === "h264Config") {
               configureDecoder(message);
             }
@@ -324,9 +373,10 @@
       if (!("VideoDecoder" in window)) setStatus("WebCodecs unavailable");
     }
     screenEl.addEventListener("pointerdown", (event) => {
-      if (activePointerId !== null) finishTouch("cancelled");
       event.preventDefault();
       screenEl.focus();
+      if (!canSendInput) return;
+      if (activePointerId !== null) finishTouch("cancelled");
       if (paused) resumeStream();
       activePointerId = event.pointerId;
       lastPoint = point(event);
@@ -347,12 +397,15 @@
     document.addEventListener("pointercancel", (event) => finishTouch("cancelled", event));
     window.addEventListener("blur", () => finishTouch("cancelled"));
     screenEl.addEventListener("keydown", (event) => {
+      if (!canSendInput) return;
       if (paused) resumeStream();
       send({ type: "key", phase: "down", key: event.key, code: event.code, repeat: event.repeat, modifiers: { shift: event.shiftKey, control: event.ctrlKey, option: event.altKey, command: event.metaKey } });
     });
     screenEl.addEventListener("keyup", (event) => {
+      if (!canSendInput) return;
       send({ type: "key", phase: "up", key: event.key, code: event.code, repeat: false, modifiers: { shift: event.shiftKey, control: event.ctrlKey, option: event.altKey, command: event.metaKey } });
     });
+    claimEl.addEventListener("click", claimWriteAccess);
     resumeEl.addEventListener("click", resumeStream);
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) finishTouch("cancelled");

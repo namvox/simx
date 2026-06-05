@@ -111,6 +111,7 @@ Default streaming options:
 --quality 0.7
 --fps 60
 --transport jpeg
+--control-mode read-only
 --idle-timeout 5m
 ```
 
@@ -146,6 +147,19 @@ Stable transport:
 - Client-to-server HID/control messages are JSON text WebSocket messages.
 - Server-to-client status, role, pause/resume, and acknowledgement messages are
   JSON text WebSocket messages.
+
+Control mode is selected explicitly when serving:
+
+- `--control-mode read-only` is the default. Clients receive frames but HID input
+  is rejected with an acknowledgement when requested.
+- `--control-mode single-controller` preserves the original controller contract:
+  the first WebSocket client may send HID input and later clients are
+  viewer-only until the controller disconnects and they reconnect.
+- `--control-mode claim` lets any connected WebSocket client claim HID write
+  permission by sending `type: "claimControl"`. A later claim transfers write
+  permission to that client.
+- `--control-mode shared` allows every connected WebSocket client to send HID
+  input.
 
 Streaming uses private Apple Simulator APIs and remains compatibility-sensitive
 even though the CLI and route shape are stable.
