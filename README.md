@@ -223,6 +223,21 @@ behavior, host load, encoding cost, and client/network backpressure. Check
 `/<slug>/stats` for current `target_fps`, frame counts, dropped frames, latency,
 `source_fps`, and `sent_fps`.
 
+Streams default to `--control-mode read-only`, so browser clients can view the
+simulator but cannot send touch, keyboard, or Home input. Start serving with an
+explicit write mode when control is required:
+
+```sh
+simx serve --slug browser-preview --port 8080 --control-mode single-controller
+simx serve --slug browser-preview --port 8080 --control-mode claim
+simx serve --slug browser-preview --port 8080 --control-mode shared
+```
+
+`single-controller` preserves the original behavior where the first WebSocket
+client controls HID and later clients are viewer-only. `claim` lets any client
+explicitly claim HID write permission from the viewer. `shared` allows every
+connected client to send HID input.
+
 The experimental H.264 path caps encoded width at 640 px to keep VideoToolbox
 tail latency bounded for browser streaming. The measured local 60 fps success
 profile uses `--transport h264 --fps 70`, which gives the browser enough source

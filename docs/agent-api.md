@@ -30,6 +30,7 @@ Lease and renew return:
 - `serve.url`
 - `serve.stream`
 - `serve.stats`
+- `serve.control_mode`
 
 Status returns:
 
@@ -136,6 +137,13 @@ simx serve --slug agent-a --host 127.0.0.1 --port 8080
 ```
 
 `simx serve` requires an active lease. It records its PID in pool state. `simx release --slug agent-a` clears the lease and sends `SIGTERM` to the tracked serve process.
+
+Serve defaults to `--control-mode read-only`, where clients receive frames but
+cannot send HID input. Agents that need simulator input must pass an explicit
+write mode: `--control-mode single-controller` for first-client control, or
+`--control-mode claim` when connected clients should explicitly claim write
+permission, or `--control-mode shared` when any connected client may send HID
+input.
 
 ## Install And Launch
 

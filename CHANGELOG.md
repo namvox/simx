@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add explicit streaming control modes with read-only as the default, plus
+  `single-controller`, `claim`, and `shared` write-access modes.
 - Add `simx update` to check for and install GitHub Release binaries.
 - Add cached latest-version hints so older clients encourage agents to run `simx update`.
 

@@ -10,7 +10,7 @@ use serde::Serialize;
 
 use crate::pool::{LeaseOptions, PoolConfig, PoolDevice, PoolService};
 use crate::simctl::{Simctl, XcrunSimctl};
-use crate::stream::{serve, ServeConfig, StreamStats, StreamTransport};
+use crate::stream::{serve, ServeConfig, StreamControlMode, StreamStats, StreamTransport};
 use crate::update::{self, UpdateHint, UpdateOptions};
 
 #[derive(Debug, Parser)]
@@ -68,6 +68,8 @@ enum Command {
         fps: u32,
         #[arg(long, value_enum, default_value = "jpeg")]
         transport: CliTransport,
+        #[arg(long, value_enum, default_value = "read-only")]
+        control_mode: CliControlMode,
         #[arg(long, default_value = "5m", value_parser = parse_duration)]
         idle_timeout: Duration,
         #[arg(long)]
@@ -92,6 +94,8 @@ enum Command {
         fps: u32,
         #[arg(long, value_enum, default_value = "jpeg")]
         transport: CliTransport,
+        #[arg(long, value_enum, default_value = "read-only")]
+        control_mode: CliControlMode,
         #[arg(long, default_value = "5m", value_parser = parse_duration)]
         idle_timeout: Duration,
     },
@@ -177,6 +181,7 @@ struct ServeOutput {
     h264_url: String,
     h264_stream: String,
     stats: String,
+    control_mode: String,
 }
 
 struct LeasePrintOptions<'a> {
@@ -184,6 +189,7 @@ struct LeasePrintOptions<'a> {
     host: &'a str,
     port: u16,
     transport: CliTransport,
+    control_mode: CliControlMode,
     json: bool,
     update: Option<UpdateHint>,
 }
@@ -199,6 +205,25 @@ impl From<CliTransport> for StreamTransport {
         match value {
             CliTransport::Jpeg => Self::Jpeg,
             CliTransport::H264 => Self::H264,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CliControlMode {
+    ReadOnly,
+    SingleController,
+    Claim,
+    Shared,
+}
+
+impl From<CliControlMode> for StreamControlMode {
+    fn from(value: CliControlMode) -> Self {
+        match value {
+            CliControlMode::ReadOnly => Self::ReadOnly,
+            CliControlMode::SingleController => Self::SingleController,
+            CliControlMode::Claim => Self::Claim,
+            CliControlMode::Shared => Self::Shared,
         }
     }
 }
@@ -421,6 +446,7 @@ fn run_with(cli: Cli, state_path: PathBuf) -> anyhow::Result<()> {
             quality,
             fps,
             transport,
+            control_mode,
             idle_timeout,
             new: _new,
         } => {
@@ -433,6 +459,7 @@ fn run_with(cli: Cli, state_path: PathBuf) -> anyhow::Result<()> {
                     host: &host,
                     port,
                     transport,
+                    control_mode,
                     json,
                     update: update_hint.clone(),
                 },
@@ -447,6 +474,7 @@ fn run_with(cli: Cli, state_path: PathBuf) -> anyhow::Result<()> {
                         quality,
                         fps,
                         transport: transport.into(),
+                        control_mode: control_mode.into(),
                         idle_timeout,
                         udid: device.udid,
                     },
@@ -461,6 +489,7 @@ fn run_with(cli: Cli, state_path: PathBuf) -> anyhow::Result<()> {
             quality,
             fps,
             transport,
+            control_mode,
             idle_timeout,
         } => {
             let device = service.active_lease(&slug)?;
@@ -473,6 +502,7 @@ fn run_with(cli: Cli, state_path: PathBuf) -> anyhow::Result<()> {
                     quality,
                     fps,
                     transport: transport.into(),
+                    control_mode: control_mode.into(),
                     idle_timeout,
                     udid: device.udid,
                 },
@@ -582,6 +612,7 @@ fn run_with(cli: Cli, state_path: PathBuf) -> anyhow::Result<()> {
                     host: "127.0.0.1",
                     port: 8080,
                     transport: CliTransport::Jpeg,
+                    control_mode: CliControlMode::ReadOnly,
                     json,
                     update: update_hint,
                 },
@@ -632,6 +663,7 @@ struct ServeCommand {
     quality: f32,
     fps: u32,
     transport: StreamTransport,
+    control_mode: StreamControlMode,
     idle_timeout: Duration,
     udid: String,
 }
@@ -656,6 +688,7 @@ fn run_serve(
         quality: command.quality,
         fps: command.fps,
         transport: command.transport,
+        control_mode: command.control_mode,
         idle_timeout: command.idle_timeout,
         slug: command.slug.clone(),
         udid: command.udid,
@@ -1124,12 +1157,19 @@ fn print_lease(
         host,
         port,
         transport,
+        control_mode,
         json,
         update,
     } = options;
     let transport_arg = match transport {
         CliTransport::Jpeg => String::new(),
         CliTransport::H264 => " --transport h264".to_string(),
+    };
+    let control_mode_arg = match control_mode {
+        CliControlMode::ReadOnly => String::new(),
+        CliControlMode::SingleController => " --control-mode single-controller".to_string(),
+        CliControlMode::Claim => " --control-mode claim".to_string(),
+        CliControlMode::Shared => " --control-mode shared".to_string(),
     };
     if json {
         let output = LeaseOutput {
@@ -1141,7 +1181,7 @@ fn print_lease(
             ttl_seconds: ttl.as_secs(),
             serve: ServeOutput {
                 command: format!(
-                    "simx serve --slug {slug} --host {host} --port {port}{transport_arg}"
+                    "simx serve --slug {slug} --host {host} --port {port}{transport_arg}{control_mode_arg}"
                 ),
                 url: match transport {
                     CliTransport::Jpeg => format!("http://{host}:{port}/{slug}"),
@@ -1151,6 +1191,7 @@ fn print_lease(
                 h264_url: format!("http://{host}:{port}/{slug}?transport=h264"),
                 h264_stream: format!("ws://{host}:{port}/{slug}/h264-stream"),
                 stats: format!("http://{host}:{port}/{slug}/stats"),
+                control_mode: StreamControlMode::from(control_mode).as_str().to_string(),
             },
             update,
         };
@@ -1160,7 +1201,7 @@ fn print_lease(
         if let Some(expires_at) = device.lease_expires_at {
             println!("lease expires at {}", format_unix_timestamp(expires_at));
         }
-        println!("serve with: simx serve --slug {slug} --host {host} --port {port}{transport_arg}");
+        println!("serve with: simx serve --slug {slug} --host {host} --port {port}{transport_arg}{control_mode_arg}");
         if transport == CliTransport::H264 {
             println!("viewer: http://{host}:{port}/{slug}?transport=h264");
         }
