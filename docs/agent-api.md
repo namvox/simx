@@ -16,6 +16,8 @@ simx run --slug agent-a --json
 simx status --json
 simx doctor --json
 simx update --check --json
+simx control snapshot --slug agent-a --json
+simx control tap --slug agent-a --nx 0.5 --ny 0.5 --json
 ```
 
 Lease and renew return:
@@ -126,6 +128,64 @@ Current error codes:
 - `internal`
 
 Agents should pass `--json-errors` whenever they need to parse command failures.
+
+## Observe And Control
+
+`simx control` is the agent-facing observe/action wrapper for an active lease.
+It does not require `simx serve` and does not add a separate HTTP control API.
+Each command looks up the active lease by slug, boots the simulator if needed,
+opens a short-lived native SimulatorKit session for that UDID, performs the
+requested operation, and exits.
+
+`simx control` is local CLI authority. It does not send `claimControl`; claim
+ownership remains a WebSocket-only concept for ordinary clients connected to
+streams started with `--control-mode claim`.
+
+Snapshot commands:
+
+```sh
+simx control snapshot --slug agent-a --json
+simx control snapshot --slug agent-a --output snapshot.jpg --json
+simx control snapshot --slug agent-a --inline-base64 --json
+```
+
+The default JSON snapshot is token-efficient. It returns metadata and cost
+estimates without embedding image bytes:
+
+```json
+{
+  "ok": true,
+  "slug": "agent-a",
+  "source": "native-snapshot",
+  "format": "jpeg",
+  "width": 393,
+  "height": 852,
+  "bytes": 184231,
+  "sha1": "...",
+  "estimated_base64_chars": 245644,
+  "estimated_base64_tokens": 61411,
+  "estimated_metadata_tokens": 93
+}
+```
+
+Input commands:
+
+```sh
+simx control tap --slug agent-a --nx 0.5 --ny 0.5 --json
+simx control touch --slug agent-a --phase began --nx 0.5 --ny 0.5 --json
+simx control swipe --slug agent-a --from-nx 0.5 --from-ny 0.8 --to-nx 0.5 --to-ny 0.2 --json
+simx control drag --slug agent-a --from-nx 0.2 --from-ny 0.2 --to-nx 0.8 --to-ny 0.8 --json
+simx control key --slug agent-a --code KeyA --json
+simx control paste --slug agent-a --text "hello" --json
+simx control button --slug agent-a home --json
+```
+
+WebSocket control modes do not restrict `simx control`. They only decide which
+browser/WebSocket clients may send HID through a served stream.
+
+`simx control tree --slug agent-a --json` is reserved for a future accessibility
+snapshot provider. It currently returns an unsupported-provider error instead
+of falling back to screenshots or private, undocumented shell probes.
 
 ## Serve Lifecycle
 

@@ -8,6 +8,11 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 
+use crate::control::{
+    button_message, capture_snapshot, key_message, paste_message, point_gesture_message,
+    send_control_message, send_control_messages, touch_message, ControlAckOutput, ControlTarget,
+    SnapshotOptions,
+};
 use crate::pool::{LeaseOptions, PoolConfig, PoolDevice, PoolService};
 use crate::simctl::{Simctl, XcrunSimctl};
 use crate::stream::{serve, ServeConfig, StreamControlMode, StreamStats, StreamTransport};
@@ -131,6 +136,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Observe and control a served simulator through the stream WebSocket.
+    Control {
+        #[command(subcommand)]
+        command: ControlCommand,
+    },
     /// Check for or install the latest simx release binary.
     Update {
         #[arg(long)]
@@ -215,6 +225,161 @@ enum CliControlMode {
     SingleController,
     Claim,
     Shared,
+}
+
+#[derive(Debug, Subcommand)]
+enum ControlCommand {
+    /// Capture the next streamed JPEG frame without printing image bytes by default.
+    Snapshot {
+        #[arg(long)]
+        slug: String,
+        #[arg(long)]
+        output: Option<PathBuf>,
+        #[arg(long)]
+        inline_base64: bool,
+        #[arg(long, default_value = "5s", value_parser = parse_duration)]
+        wait_timeout: Duration,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Send a tap as touch began + touch ended.
+    Tap {
+        #[arg(long)]
+        slug: String,
+        #[arg(long)]
+        nx: f64,
+        #[arg(long)]
+        ny: f64,
+        #[arg(long, default_value = "5s", value_parser = parse_duration)]
+        wait_timeout: Duration,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Send one touch phase.
+    Touch {
+        #[arg(long)]
+        slug: String,
+        #[arg(long, value_enum)]
+        phase: TouchPhase,
+        #[arg(long)]
+        nx: f64,
+        #[arg(long)]
+        ny: f64,
+        #[arg(long, default_value = "5s", value_parser = parse_duration)]
+        wait_timeout: Duration,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Send a swipe helper message.
+    Swipe {
+        #[arg(long)]
+        slug: String,
+        #[arg(long)]
+        from_nx: f64,
+        #[arg(long)]
+        from_ny: f64,
+        #[arg(long)]
+        to_nx: f64,
+        #[arg(long)]
+        to_ny: f64,
+        #[arg(long)]
+        steps: Option<u32>,
+        #[arg(long, default_value = "5s", value_parser = parse_duration)]
+        wait_timeout: Duration,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Send a drag helper message.
+    Drag {
+        #[arg(long)]
+        slug: String,
+        #[arg(long)]
+        from_nx: f64,
+        #[arg(long)]
+        from_ny: f64,
+        #[arg(long)]
+        to_nx: f64,
+        #[arg(long)]
+        to_ny: f64,
+        #[arg(long)]
+        steps: Option<u32>,
+        #[arg(long, default_value = "5s", value_parser = parse_duration)]
+        wait_timeout: Duration,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Send a key down/up pair for a browser KeyboardEvent.code value.
+    Key {
+        #[arg(long)]
+        slug: String,
+        #[arg(long)]
+        code: String,
+        #[arg(long, default_value = "5s", value_parser = parse_duration)]
+        wait_timeout: Duration,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Type supported text through simulated key events.
+    Paste {
+        #[arg(long)]
+        slug: String,
+        #[arg(long)]
+        text: String,
+        #[arg(long, default_value = "5s", value_parser = parse_duration)]
+        wait_timeout: Duration,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Press a hardware button.
+    Button {
+        #[arg(long)]
+        slug: String,
+        #[arg(value_enum)]
+        button: ControlButton,
+        #[arg(long, default_value = "5s", value_parser = parse_duration)]
+        wait_timeout: Duration,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Return a simulator accessibility tree when a supported provider exists.
+    Tree {
+        #[arg(long)]
+        slug: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum TouchPhase {
+    Began,
+    Moved,
+    Ended,
+    Cancelled,
+}
+
+impl TouchPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Began => "began",
+            Self::Moved => "moved",
+            Self::Ended => "ended",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ControlButton {
+    Home,
+}
+
+impl ControlButton {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Home => "home",
+        }
+    }
 }
 
 impl From<CliControlMode> for StreamControlMode {
@@ -557,6 +722,9 @@ fn run_with(cli: Cli, state_path: PathBuf) -> anyhow::Result<()> {
                 update_hint,
             )?;
         }
+        Command::Control { command } => {
+            run_control_command(&mut service, &mut simctl, command)?;
+        }
         Command::Update {
             check,
             version,
@@ -666,6 +834,285 @@ struct ServeCommand {
     control_mode: StreamControlMode,
     idle_timeout: Duration,
     udid: String,
+}
+
+#[derive(Debug, Serialize)]
+struct TapOutput {
+    ok: bool,
+    slug: String,
+    udid: String,
+    source: &'static str,
+    command: &'static str,
+    began: serde_json::Value,
+    ended: serde_json::Value,
+}
+
+fn run_control_command(
+    service: &mut PoolService,
+    simctl: &mut impl Simctl,
+    command: ControlCommand,
+) -> anyhow::Result<()> {
+    match command {
+        ControlCommand::Snapshot {
+            slug,
+            output,
+            inline_base64,
+            wait_timeout,
+            json,
+        } => {
+            let target = control_target(service, simctl, &slug)?;
+            let snapshot = capture_snapshot(
+                &target,
+                SnapshotOptions {
+                    output: output.as_deref(),
+                    inline_base64,
+                    wait_timeout,
+                },
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&snapshot)?);
+            } else if let Some(path) = snapshot.path {
+                println!("wrote {path}");
+                println!(
+                    "{} bytes; estimated inline base64 tokens: {}; metadata tokens: {}",
+                    snapshot.metadata.bytes,
+                    snapshot.metadata.estimated_base64_tokens,
+                    snapshot.metadata.estimated_metadata_tokens
+                );
+            } else if inline_base64 {
+                if let Some(base64) = snapshot.base64 {
+                    println!("{base64}");
+                }
+            } else {
+                println!("{}", serde_json::to_string_pretty(&snapshot.metadata)?);
+            }
+        }
+        ControlCommand::Tap {
+            slug,
+            nx,
+            ny,
+            wait_timeout,
+            json,
+        } => {
+            validate_normalized_point(nx, ny)?;
+            let target = control_target(service, simctl, &slug)?;
+            let outputs = send_control_messages(
+                &target,
+                "tap",
+                vec![
+                    with_message_id(touch_message("began", nx, ny), "simx-control-tap-began"),
+                    with_message_id(touch_message("ended", nx, ny), "simx-control-tap-ended"),
+                ],
+                wait_timeout,
+            )?;
+            let began = outputs
+                .first()
+                .with_context(|| "tap began acknowledgement missing")?;
+            let ended = outputs
+                .get(1)
+                .with_context(|| "tap ended acknowledgement missing")?;
+            let output = TapOutput {
+                ok: began.ok && ended.ok,
+                slug: target.slug,
+                udid: target.udid,
+                source: "native-hid",
+                command: "tap",
+                began: began.ack.clone(),
+                ended: ended.ack.clone(),
+            };
+            print_control_json_or_summary(json, &output.ok, "tap", &output)?;
+        }
+        ControlCommand::Touch {
+            slug,
+            phase,
+            nx,
+            ny,
+            wait_timeout,
+            json,
+        } => {
+            validate_normalized_point(nx, ny)?;
+            let target = control_target(service, simctl, &slug)?;
+            let output = send_control_message(
+                &target,
+                "touch",
+                touch_message(phase.as_str(), nx, ny),
+                wait_timeout,
+            )?;
+            print_control_output(json, output)?;
+        }
+        ControlCommand::Swipe {
+            slug,
+            from_nx,
+            from_ny,
+            to_nx,
+            to_ny,
+            steps,
+            wait_timeout,
+            json,
+        } => {
+            validate_normalized_point(from_nx, from_ny)?;
+            validate_normalized_point(to_nx, to_ny)?;
+            let target = control_target(service, simctl, &slug)?;
+            let output = send_control_message(
+                &target,
+                "swipe",
+                point_gesture_message("swipe", from_nx, from_ny, to_nx, to_ny, steps),
+                wait_timeout,
+            )?;
+            print_control_output(json, output)?;
+        }
+        ControlCommand::Drag {
+            slug,
+            from_nx,
+            from_ny,
+            to_nx,
+            to_ny,
+            steps,
+            wait_timeout,
+            json,
+        } => {
+            validate_normalized_point(from_nx, from_ny)?;
+            validate_normalized_point(to_nx, to_ny)?;
+            let target = control_target(service, simctl, &slug)?;
+            let output = send_control_message(
+                &target,
+                "drag",
+                point_gesture_message("drag", from_nx, from_ny, to_nx, to_ny, steps),
+                wait_timeout,
+            )?;
+            print_control_output(json, output)?;
+        }
+        ControlCommand::Key {
+            slug,
+            code,
+            wait_timeout,
+            json,
+        } => {
+            let target = control_target(service, simctl, &slug)?;
+            let outputs = send_control_messages(
+                &target,
+                "key",
+                vec![
+                    with_message_id(key_message(&code, "down"), "simx-control-key-down"),
+                    with_message_id(key_message(&code, "up"), "simx-control-key-up"),
+                ],
+                wait_timeout,
+            )?;
+            let down = outputs
+                .first()
+                .with_context(|| "key down acknowledgement missing")?;
+            let up = outputs
+                .get(1)
+                .with_context(|| "key up acknowledgement missing")?;
+            let output = TapOutput {
+                ok: down.ok && up.ok,
+                slug: target.slug,
+                udid: target.udid,
+                source: "native-hid",
+                command: "key",
+                began: down.ack.clone(),
+                ended: up.ack.clone(),
+            };
+            print_control_json_or_summary(json, &output.ok, "key", &output)?;
+        }
+        ControlCommand::Paste {
+            slug,
+            text,
+            wait_timeout,
+            json,
+        } => {
+            let target = control_target(service, simctl, &slug)?;
+            let output =
+                send_control_message(&target, "paste", paste_message(&text), wait_timeout)?;
+            print_control_output(json, output)?;
+        }
+        ControlCommand::Button {
+            slug,
+            button,
+            wait_timeout,
+            json,
+        } => {
+            let target = control_target(service, simctl, &slug)?;
+            let output = send_control_message(
+                &target,
+                "button",
+                button_message(button.as_str()),
+                wait_timeout,
+            )?;
+            print_control_output(json, output)?;
+        }
+        ControlCommand::Tree { slug, json } => {
+            let target = control_target(service, simctl, &slug)?;
+            let output = serde_json::json!({
+                "ok": false,
+                "slug": target.slug,
+                "udid": target.udid,
+                "source": "accessibility-tree",
+                "error": "unsupported",
+                "message": "simx control tree is reserved for an accessibility snapshot provider; no provider is implemented yet"
+            });
+            if json {
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else {
+                anyhow::bail!("{}", output["message"].as_str().unwrap_or("unsupported"));
+            }
+            anyhow::bail!("accessibility tree provider is not implemented");
+        }
+    }
+    Ok(())
+}
+
+fn control_target(
+    service: &mut PoolService,
+    simctl: &mut impl Simctl,
+    slug: &str,
+) -> anyhow::Result<ControlTarget> {
+    let device = service.active_lease(slug)?;
+    simctl
+        .boot_if_needed(&device.udid)
+        .with_context(|| format!("failed to boot {}", device.udid))?;
+    Ok(ControlTarget {
+        slug: slug.to_string(),
+        udid: device.udid,
+    })
+}
+
+fn validate_normalized_point(nx: f64, ny: f64) -> anyhow::Result<()> {
+    if !(0.0..=1.0).contains(&nx) || !(0.0..=1.0).contains(&ny) {
+        anyhow::bail!("normalized coordinates must be within 0.0..=1.0");
+    }
+    Ok(())
+}
+
+fn with_message_id(mut message: serde_json::Value, id: &str) -> serde_json::Value {
+    if let Some(object) = message.as_object_mut() {
+        object.insert("id".to_string(), serde_json::Value::String(id.to_string()));
+    }
+    message
+}
+
+fn print_control_output(json: bool, output: ControlAckOutput) -> anyhow::Result<()> {
+    let ok = output.ok;
+    print_control_json_or_summary(json, &ok, &output.command.clone(), &output)
+}
+
+fn print_control_json_or_summary<T: Serialize>(
+    json: bool,
+    ok: &bool,
+    command: &str,
+    output: &T,
+) -> anyhow::Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(output)?);
+    } else if *ok {
+        println!("{command} ok");
+    } else {
+        println!("{command} rejected");
+    }
+    if !*ok {
+        anyhow::bail!("{command} rejected");
+    }
+    Ok(())
 }
 
 fn run_serve(

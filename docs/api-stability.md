@@ -164,6 +164,37 @@ Control mode is selected explicitly when serving:
 Streaming uses private Apple Simulator APIs and remains compatibility-sensitive
 even though the CLI and route shape are stable.
 
+Stable agent control commands:
+
+```text
+simx control snapshot --slug <slug> --json
+simx control snapshot --slug <slug> --output <path> --json
+simx control tap --slug <slug> --nx <0..1> --ny <0..1> --json
+simx control touch --slug <slug> --phase <began|moved|ended|cancelled> --nx <0..1> --ny <0..1> --json
+simx control swipe --slug <slug> --from-nx <0..1> --from-ny <0..1> --to-nx <0..1> --to-ny <0..1> --json
+simx control drag --slug <slug> --from-nx <0..1> --from-ny <0..1> --to-nx <0..1> --to-ny <0..1> --json
+simx control key --slug <slug> --code <KeyboardEvent.code> --json
+simx control paste --slug <slug> --text <text> --json
+simx control button --slug <slug> home --json
+```
+
+These commands operate on the active lease directly through a short-lived native
+SimulatorKit session. They do not require `simx serve`, do not use
+`WS /<slug>/stream`, and do not create a separate HTTP control API.
+`simx control snapshot --json` is intentionally metadata-only unless `--output`
+or `--inline-base64` is requested. WebSocket control modes and `claimControl`
+apply only to ordinary browser/WebSocket stream clients, not to local CLI
+control commands.
+
+Experimental agent control commands:
+
+```text
+simx control tree --slug <slug> --json
+```
+
+The accessibility tree command is reserved for a future provider and is not a
+stable data contract yet.
+
 ## HID Message Core
 
 The core HID/control message families are frozen in `v0.1.0`:

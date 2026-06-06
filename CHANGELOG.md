@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add `simx control` for native agent snapshots and HID commands,
+  with metadata-only snapshot JSON as the token-efficient default.
 - Add explicit streaming control modes with read-only as the default, plus
   `single-controller`, `claim`, and `shared` write-access modes.
 - Add `simx update` to check for and install GitHub Release binaries.

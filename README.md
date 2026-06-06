@@ -238,6 +238,30 @@ client controls HID and later clients are viewer-only. `claim` lets any client
 explicitly claim HID write permission from the viewer. `shared` allows every
 connected client to send HID input.
 
+Agent commands can observe and control an active lease without starting
+`simx serve`:
+
+```sh
+simx control snapshot --slug browser-preview --json
+simx control snapshot --slug browser-preview --output snapshot.jpg --json
+simx control tap --slug browser-preview --nx 0.5 --ny 0.5 --json
+simx control swipe --slug browser-preview --from-nx 0.5 --from-ny 0.8 --to-nx 0.5 --to-ny 0.2 --json
+simx control key --slug browser-preview --code KeyA --json
+simx control paste --slug browser-preview --text "hello" --json
+simx control button --slug browser-preview home --json
+```
+
+`simx control snapshot --json` is token-efficient by default: it returns frame
+metadata, dimensions when available, a hash, and estimated inline-image token
+cost without printing base64 image bytes. Use `--output` to write the JPEG frame
+or `--inline-base64` only when an inline image payload is required.
+
+`simx control` opens a short-lived native SimulatorKit session for the leased
+simulator. It does not use the served WebSocket stream, and it does not send
+`claimControl`. Stream control modes apply only to browser/WebSocket clients.
+`simx control tree` is reserved for a future accessibility snapshot provider and
+currently reports that no provider is implemented.
+
 The experimental H.264 path caps encoded width at 640 px to keep VideoToolbox
 tail latency bounded for browser streaming. The measured local 60 fps success
 profile uses `--transport h264 --fps 70`, which gives the browser enough source
