@@ -84,6 +84,7 @@ static void simx_h264_output_callback(void *outputCallbackRefCon,
 @property (nonatomic, assign) SimxKeyboardMessageFn keyboardMessage;
 @property (nonatomic, assign) SimxButtonMessageFn buttonMessage;
 @property (nonatomic, assign) SimxArbitraryHIDMessageFn arbitraryHIDMessage;
+@property (nonatomic, assign) int hidTimeoutMs;
 @end
 
 @implementation SimxFrameStreamer
@@ -396,7 +397,8 @@ static void simx_h264_output_callback(void *outputCallbackRefCon,
         free(message);
         return NO;
     }
-    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC));
+    int timeoutMs = self.hidTimeoutMs > 0 ? self.hidTimeoutMs : 2000;
+    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, (int64_t)timeoutMs * NSEC_PER_MSEC);
     if (dispatch_semaphore_wait(semaphore, deadline) != 0) {
         simx_set_error(error, @"Timed out waiting for SimulatorKit HID delivery.");
         return NO;
@@ -650,6 +652,7 @@ void *simx_frame_stream_start(const char *developer_dir,
                               int bitrate,
                               SimxEncodedFrameCallback encoded_callback,
                               void *encoded_callback_context,
+                              int hid_timeout_ms,
                               char **error)
 {
     @autoreleasepool {
@@ -769,6 +772,7 @@ void *simx_frame_stream_start(const char *developer_dir,
         streamer.hidClient = hidClient;
         streamer.targetFPS = target_fps > 0 ? target_fps : 60;
         streamer.bitrate = bitrate > 0 ? bitrate : 8 * 1000 * 1000;
+        streamer.hidTimeoutMs = hid_timeout_ms > 0 ? hid_timeout_ms : 2000;
         streamer.encodedCallback = encoded_callback;
         streamer.encodedCallbackContext = encoded_callback_context;
         streamer.mouseMessage = (SimxMouseMessageFn)dlsym(simKitHandle, "IndigoHIDMessageForMouseNSEvent");

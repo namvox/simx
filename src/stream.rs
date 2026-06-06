@@ -1101,6 +1101,7 @@ impl NativeFrameSource {
                 8 * 1000 * 1000,
                 None,
                 ptr::null_mut(),
+                2000,
                 &mut error,
             )
         };
@@ -1216,6 +1217,7 @@ impl EncodedFrameSource {
                 bitrate,
                 Some(native_encoded_frame_callback),
                 raw_context,
+                2000,
                 &mut error,
             )
         };
@@ -1596,6 +1598,7 @@ extern "C" {
             ),
         >,
         encoded_callback_context: *mut c_void,
+        hid_timeout_ms: i32,
         error: *mut *mut c_char,
     ) -> *mut c_void;
     fn simx_frame_stream_stop(handle: *mut c_void);

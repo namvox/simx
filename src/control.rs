@@ -114,9 +114,9 @@ pub fn send_control_messages(
     target: &ControlTarget,
     command: &str,
     messages: Vec<serde_json::Value>,
-    _wait_timeout: Duration,
+    wait_timeout: Duration,
 ) -> anyhow::Result<Vec<ControlAckOutput>> {
-    let session = NativeHidSession::start(&target.udid)?;
+    let session = NativeHidSession::start(&target.udid, wait_timeout)?;
     let mut outputs = Vec::with_capacity(messages.len());
     for message in messages {
         let message = ensure_ack(message, command);
@@ -192,7 +192,7 @@ pub fn handle_hid_input(target: &impl HidTarget, text: &str) -> anyhow::Result<V
             if let Some(key_code) = browser_code_to_hid(code) {
                 send_key_with_modifiers(target, key_code, down, &value)
             } else {
-                Ok(())
+                bail!("unsupported KeyboardEvent.code: {code}")
             }
         }
         Some("paste") => {
@@ -630,6 +630,10 @@ fn estimate_tokens(chars: usize) -> usize {
     chars.div_ceil(4)
 }
 
+fn duration_millis_i32(duration: Duration) -> i32 {
+    duration.as_millis().clamp(1, i32::MAX as u128) as i32
+}
+
 fn jpeg_dimensions(bytes: &[u8]) -> anyhow::Result<(Option<u16>, Option<u16>)> {
     if bytes.len() < 4 || bytes[0] != 0xff || bytes[1] != 0xd8 {
         bail!("not a jpeg frame");
@@ -686,10 +690,11 @@ struct NativeHidSession {
 
 #[cfg(target_os = "macos")]
 impl NativeHidSession {
-    fn start(udid: &str) -> anyhow::Result<Self> {
+    fn start(udid: &str, wait_timeout: Duration) -> anyhow::Result<Self> {
         let developer_dir = CString::new(developer_dir()?)?;
         let udid = CString::new(udid)?;
         let mut error: *mut c_char = ptr::null_mut();
+        let hid_timeout_ms = duration_millis_i32(wait_timeout);
         let handle = unsafe {
             simx_frame_stream_start(
                 developer_dir.as_ptr(),
@@ -701,6 +706,7 @@ impl NativeHidSession {
                 8 * 1000 * 1000,
                 None,
                 ptr::null_mut(),
+                hid_timeout_ms,
                 &mut error,
             )
         };
@@ -745,8 +751,8 @@ struct NativeHidSession;
 
 #[cfg(not(target_os = "macos"))]
 impl NativeHidSession {
-    fn start(udid: &str) -> anyhow::Result<Self> {
-        let _ = udid;
+    fn start(udid: &str, wait_timeout: Duration) -> anyhow::Result<Self> {
+        let _ = (udid, wait_timeout);
         bail!("HID input requires macOS private Simulator APIs");
     }
 }
@@ -775,6 +781,7 @@ fn capture_native_snapshot(udid: &str, wait_timeout: Duration) -> anyhow::Result
             8 * 1000 * 1000,
             None,
             ptr::null_mut(),
+            2000,
             &mut error,
         )
     };
@@ -899,6 +906,7 @@ extern "C" {
             ),
         >,
         encoded_callback_context: *mut c_void,
+        hid_timeout_ms: i32,
         error: *mut *mut c_char,
     ) -> *mut c_void;
     fn simx_frame_stream_stop(handle: *mut c_void);
@@ -956,5 +964,38 @@ mod tests {
         assert_eq!(plan.end_ny, 0.25);
         assert_eq!(plan.hold, Duration::from_millis(500));
         assert_eq!(plan.steps, 12);
+    }
+
+    #[test]
+    fn unsupported_key_code_returns_failed_ack() {
+        struct NoopTarget;
+
+        impl HidTarget for NoopTarget {
+            fn send_touch(&self, _nx: f64, _ny: f64, _down: bool) -> anyhow::Result<()> {
+                Ok(())
+            }
+
+            fn send_key(&self, _key_code: u16, _down: bool) -> anyhow::Result<()> {
+                Ok(())
+            }
+
+            fn press_home(&self) -> anyhow::Result<()> {
+                Ok(())
+            }
+        }
+
+        let error = handle_hid_input(
+            &NoopTarget,
+            r#"{"type":"key","id":"bad-key","ack":true,"phase":"down","code":"KeyFoo"}"#,
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "unsupported KeyboardEvent.code: KeyFoo");
+    }
+
+    #[test]
+    fn hid_timeout_is_clamped_to_native_milliseconds() {
+        assert_eq!(duration_millis_i32(Duration::ZERO), 1);
+        assert_eq!(duration_millis_i32(Duration::from_millis(125)), 125);
+        assert_eq!(duration_millis_i32(Duration::from_secs(u64::MAX)), i32::MAX);
     }
 }
