@@ -15,6 +15,7 @@ use base64::Engine;
 use serde::Serialize;
 use sha1::{Digest, Sha1};
 
+use crate::control::{handle_hid_input, HidTarget};
 use crate::pool::PoolService;
 
 const VIEWER_HTML: &str = include_str!("../viewer/index.html");
@@ -174,7 +175,7 @@ pub fn serve(config: ServeConfig) -> anyhow::Result<()> {
             break;
         }
         match listener.accept() {
-            Ok((stream, _addr)) => {
+            Ok((stream, _peer_addr)) => {
                 let config = config.clone();
                 let frame_source = frame_source.clone();
                 let h264_source = h264_source.clone();
@@ -398,7 +399,7 @@ fn stream_frames(
                         .can_send_input(&config, client_id, is_controller)
                     {
                         last_activity = Instant::now();
-                        match frame_source.handle_input(&text) {
+                        match handle_hid_input(frame_source.as_ref(), &text) {
                             Ok(acks) => {
                                 for ack in acks {
                                     write_ws_text(&mut stream, &ack)?;
@@ -617,7 +618,7 @@ fn stream_h264_frames(
                         .can_send_input(&config, client_id, is_controller)
                     {
                         last_activity = Instant::now();
-                        match encoded_source.handle_hid_input(&text) {
+                        match handle_hid_input(encoded_source.as_ref(), &text) {
                             Ok(acks) => {
                                 for ack in acks {
                                     write_ws_text(&mut stream, &ack)?;
@@ -1100,6 +1101,7 @@ impl NativeFrameSource {
                 8 * 1000 * 1000,
                 None,
                 ptr::null_mut(),
+                2000,
                 &mut error,
             )
         };
@@ -1137,155 +1139,6 @@ impl NativeFrameSource {
             latest.frame.clone(),
             latest.received_at.unwrap_or_else(Instant::now),
         ))
-    }
-
-    fn handle_input(&self, text: &str) -> anyhow::Result<Vec<String>> {
-        let value: serde_json::Value = serde_json::from_str(text)?;
-        let result = match value.get("type").and_then(|value| value.as_str()) {
-            Some("touch") => {
-                let nx = value
-                    .get("nx")
-                    .and_then(|value| value.as_f64())
-                    .unwrap_or(0.0);
-                let ny = value
-                    .get("ny")
-                    .and_then(|value| value.as_f64())
-                    .unwrap_or(0.0);
-                let phase = value
-                    .get("phase")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("");
-                let down = matches!(phase, "began" | "moved");
-                self.send_touch(nx, ny, down)
-            }
-            Some("swipe") | Some("drag") => self.send_drag_or_swipe(&value),
-            Some("longPressScroll") | Some("long_press_scroll") => {
-                self.send_long_press_scroll(&value)
-            }
-            Some("key") => {
-                let phase = value
-                    .get("phase")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("");
-                let down = phase == "down";
-                let code = value
-                    .get("code")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("");
-                if let Some(key_code) = browser_code_to_hid(code) {
-                    self.send_key_with_modifiers(key_code, down, &value)
-                } else {
-                    Ok(())
-                }
-            }
-            Some("paste") => {
-                let text = value
-                    .get("text")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("");
-                self.send_text(text)
-            }
-            Some("button")
-                if value.get("button").and_then(|value| value.as_str()) == Some("home") =>
-            {
-                self.press_home()
-            }
-            _ => Ok(()),
-        };
-        result?;
-        Ok(input_ack(text, true, "ok").into_iter().collect())
-    }
-
-    fn send_drag_or_swipe(&self, value: &serde_json::Value) -> anyhow::Result<()> {
-        let from = value.get("from").unwrap_or(value);
-        let to = value.get("to").unwrap_or(value);
-        let from_x = from
-            .get("nx")
-            .and_then(|value| value.as_f64())
-            .unwrap_or(0.5);
-        let from_y = from
-            .get("ny")
-            .and_then(|value| value.as_f64())
-            .unwrap_or(0.5);
-        let to_x = to
-            .get("nx")
-            .and_then(|value| value.as_f64())
-            .unwrap_or(from_x);
-        let to_y = to
-            .get("ny")
-            .and_then(|value| value.as_f64())
-            .unwrap_or(from_y);
-        let steps = value
-            .get("steps")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(8)
-            .clamp(2, 60);
-        self.send_touch(from_x, from_y, true)?;
-        for step in 1..steps {
-            let ratio = step as f64 / steps as f64;
-            self.send_touch(
-                from_x + (to_x - from_x) * ratio,
-                from_y + (to_y - from_y) * ratio,
-                true,
-            )?;
-            thread::sleep(Duration::from_millis(8));
-        }
-        self.send_touch(to_x, to_y, false)
-    }
-
-    fn send_long_press_scroll(&self, value: &serde_json::Value) -> anyhow::Result<()> {
-        let plan = long_press_scroll_plan(value);
-        self.send_touch(plan.start_nx, plan.start_ny, true)?;
-        thread::sleep(plan.hold);
-        for step in 1..plan.steps {
-            let ratio = step as f64 / plan.steps as f64;
-            self.send_touch(
-                plan.start_nx + (plan.end_nx - plan.start_nx) * ratio,
-                plan.start_ny + (plan.end_ny - plan.start_ny) * ratio,
-                true,
-            )?;
-            thread::sleep(Duration::from_millis(8));
-        }
-        self.send_touch(plan.end_nx, plan.end_ny, false)
-    }
-
-    fn send_key_with_modifiers(
-        &self,
-        key_code: u16,
-        down: bool,
-        value: &serde_json::Value,
-    ) -> anyhow::Result<()> {
-        let modifiers = modifier_key_codes(value);
-        if down {
-            for modifier in &modifiers {
-                self.send_key(*modifier, true)?;
-            }
-            self.send_key(key_code, true)
-        } else {
-            self.send_key(key_code, false)?;
-            for modifier in modifiers.iter().rev() {
-                self.send_key(*modifier, false)?;
-            }
-            Ok(())
-        }
-    }
-
-    fn send_text(&self, text: &str) -> anyhow::Result<()> {
-        for ch in text.chars() {
-            let Some((key_code, shift)) = char_to_hid(ch) else {
-                continue;
-            };
-            if shift {
-                self.send_key(0xe1, true)?;
-            }
-            self.send_key(key_code, true)?;
-            self.send_key(key_code, false)?;
-            if shift {
-                self.send_key(0xe1, false)?;
-            }
-            thread::sleep(Duration::from_millis(5));
-        }
-        Ok(())
     }
 
     #[cfg(target_os = "macos")]
@@ -1327,6 +1180,20 @@ impl NativeFrameSource {
     }
 }
 
+impl HidTarget for NativeFrameSource {
+    fn send_touch(&self, nx: f64, ny: f64, down: bool) -> anyhow::Result<()> {
+        NativeFrameSource::send_touch(self, nx, ny, down)
+    }
+
+    fn send_key(&self, key_code: u16, down: bool) -> anyhow::Result<()> {
+        NativeFrameSource::send_key(self, key_code, down)
+    }
+
+    fn press_home(&self) -> anyhow::Result<()> {
+        NativeFrameSource::press_home(self)
+    }
+}
+
 impl EncodedFrameSource {
     #[cfg(target_os = "macos")]
     pub fn start_h264(config: &ServeConfig, bitrate: i32) -> anyhow::Result<Self> {
@@ -1350,6 +1217,7 @@ impl EncodedFrameSource {
                 bitrate,
                 Some(native_encoded_frame_callback),
                 raw_context,
+                2000,
                 &mut error,
             )
         };
@@ -1475,155 +1343,6 @@ impl EncodedFrameSource {
         bail!("keyframe requests require macOS private Simulator APIs and VideoToolbox");
     }
 
-    fn handle_hid_input(&self, text: &str) -> anyhow::Result<Vec<String>> {
-        let value: serde_json::Value = serde_json::from_str(text)?;
-        let result = match value.get("type").and_then(|value| value.as_str()) {
-            Some("touch") => {
-                let nx = value
-                    .get("nx")
-                    .and_then(|value| value.as_f64())
-                    .unwrap_or(0.0);
-                let ny = value
-                    .get("ny")
-                    .and_then(|value| value.as_f64())
-                    .unwrap_or(0.0);
-                let phase = value
-                    .get("phase")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("");
-                let down = matches!(phase, "began" | "moved");
-                self.send_touch(nx, ny, down)
-            }
-            Some("swipe") | Some("drag") => self.send_drag_or_swipe(&value),
-            Some("longPressScroll") | Some("long_press_scroll") => {
-                self.send_long_press_scroll(&value)
-            }
-            Some("key") => {
-                let phase = value
-                    .get("phase")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("");
-                let down = phase == "down";
-                let code = value
-                    .get("code")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("");
-                if let Some(key_code) = browser_code_to_hid(code) {
-                    self.send_key_with_modifiers(key_code, down, &value)
-                } else {
-                    Ok(())
-                }
-            }
-            Some("paste") => {
-                let text = value
-                    .get("text")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("");
-                self.send_text(text)
-            }
-            Some("button")
-                if value.get("button").and_then(|value| value.as_str()) == Some("home") =>
-            {
-                self.press_home()
-            }
-            _ => Ok(()),
-        };
-        result?;
-        Ok(input_ack(text, true, "ok").into_iter().collect())
-    }
-
-    fn send_drag_or_swipe(&self, value: &serde_json::Value) -> anyhow::Result<()> {
-        let from = value.get("from").unwrap_or(value);
-        let to = value.get("to").unwrap_or(value);
-        let from_x = from
-            .get("nx")
-            .and_then(|value| value.as_f64())
-            .unwrap_or(0.5);
-        let from_y = from
-            .get("ny")
-            .and_then(|value| value.as_f64())
-            .unwrap_or(0.5);
-        let to_x = to
-            .get("nx")
-            .and_then(|value| value.as_f64())
-            .unwrap_or(from_x);
-        let to_y = to
-            .get("ny")
-            .and_then(|value| value.as_f64())
-            .unwrap_or(from_y);
-        let steps = value
-            .get("steps")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(8)
-            .clamp(2, 60);
-        self.send_touch(from_x, from_y, true)?;
-        for step in 1..steps {
-            let ratio = step as f64 / steps as f64;
-            self.send_touch(
-                from_x + (to_x - from_x) * ratio,
-                from_y + (to_y - from_y) * ratio,
-                true,
-            )?;
-            thread::sleep(Duration::from_millis(8));
-        }
-        self.send_touch(to_x, to_y, false)
-    }
-
-    fn send_long_press_scroll(&self, value: &serde_json::Value) -> anyhow::Result<()> {
-        let plan = long_press_scroll_plan(value);
-        self.send_touch(plan.start_nx, plan.start_ny, true)?;
-        thread::sleep(plan.hold);
-        for step in 1..plan.steps {
-            let ratio = step as f64 / plan.steps as f64;
-            self.send_touch(
-                plan.start_nx + (plan.end_nx - plan.start_nx) * ratio,
-                plan.start_ny + (plan.end_ny - plan.start_ny) * ratio,
-                true,
-            )?;
-            thread::sleep(Duration::from_millis(8));
-        }
-        self.send_touch(plan.end_nx, plan.end_ny, false)
-    }
-
-    fn send_key_with_modifiers(
-        &self,
-        key_code: u16,
-        down: bool,
-        value: &serde_json::Value,
-    ) -> anyhow::Result<()> {
-        let modifiers = modifier_key_codes(value);
-        if down {
-            for modifier in &modifiers {
-                self.send_key(*modifier, true)?;
-            }
-            self.send_key(key_code, true)
-        } else {
-            self.send_key(key_code, false)?;
-            for modifier in modifiers.iter().rev() {
-                self.send_key(*modifier, false)?;
-            }
-            Ok(())
-        }
-    }
-
-    fn send_text(&self, text: &str) -> anyhow::Result<()> {
-        for ch in text.chars() {
-            let Some((key_code, shift)) = char_to_hid(ch) else {
-                continue;
-            };
-            if shift {
-                self.send_key(0xe1, true)?;
-            }
-            self.send_key(key_code, true)?;
-            self.send_key(key_code, false)?;
-            if shift {
-                self.send_key(0xe1, false)?;
-            }
-            thread::sleep(Duration::from_millis(5));
-        }
-        Ok(())
-    }
-
     #[cfg(target_os = "macos")]
     fn send_touch(&self, nx: f64, ny: f64, down: bool) -> anyhow::Result<()> {
         let mut error: *mut c_char = ptr::null_mut();
@@ -1660,6 +1379,20 @@ impl EncodedFrameSource {
     #[cfg(not(target_os = "macos"))]
     fn press_home(&self) -> anyhow::Result<()> {
         bail!("HID input requires macOS private Simulator APIs");
+    }
+}
+
+impl HidTarget for EncodedFrameSource {
+    fn send_touch(&self, nx: f64, ny: f64, down: bool) -> anyhow::Result<()> {
+        EncodedFrameSource::send_touch(self, nx, ny, down)
+    }
+
+    fn send_key(&self, key_code: u16, down: bool) -> anyhow::Result<()> {
+        EncodedFrameSource::send_key(self, key_code, down)
+    }
+
+    fn press_home(&self) -> anyhow::Result<()> {
+        EncodedFrameSource::press_home(self)
     }
 }
 
@@ -1805,72 +1538,6 @@ fn is_keyframe_request_message(text: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn modifier_key_codes(value: &serde_json::Value) -> Vec<u16> {
-    let Some(modifiers) = value.get("modifiers") else {
-        return Vec::new();
-    };
-    let mut keys = Vec::new();
-    if modifiers
-        .get("control")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false)
-    {
-        keys.push(0xe0);
-    }
-    if modifiers
-        .get("shift")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false)
-    {
-        keys.push(0xe1);
-    }
-    if modifiers
-        .get("option")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false)
-    {
-        keys.push(0xe2);
-    }
-    if modifiers
-        .get("command")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false)
-    {
-        keys.push(0xe3);
-    }
-    keys
-}
-
-fn char_to_hid(ch: char) -> Option<(u16, bool)> {
-    match ch {
-        'a'..='z' => Some((((ch as u8 - b'a') + 0x04) as u16, false)),
-        'A'..='Z' => Some((((ch as u8 - b'A') + 0x04) as u16, true)),
-        '1' => Some((0x1e, false)),
-        '2' => Some((0x1f, false)),
-        '3' => Some((0x20, false)),
-        '4' => Some((0x21, false)),
-        '5' => Some((0x22, false)),
-        '6' => Some((0x23, false)),
-        '7' => Some((0x24, false)),
-        '8' => Some((0x25, false)),
-        '9' => Some((0x26, false)),
-        '0' => Some((0x27, false)),
-        ' ' => Some((0x2c, false)),
-        '\n' => Some((0x28, false)),
-        '-' => Some((0x2d, false)),
-        '_' => Some((0x2d, true)),
-        '=' => Some((0x2e, false)),
-        '+' => Some((0x2e, true)),
-        ',' => Some((0x36, false)),
-        '<' => Some((0x36, true)),
-        '.' => Some((0x37, false)),
-        '>' => Some((0x37, true)),
-        '/' => Some((0x38, false)),
-        '?' => Some((0x38, true)),
-        _ => None,
-    }
-}
-
 #[cfg(target_os = "macos")]
 fn developer_dir() -> anyhow::Result<String> {
     if let Ok(value) = std::env::var("DEVELOPER_DIR") {
@@ -1891,75 +1558,6 @@ fn developer_dir() -> anyhow::Result<String> {
     Ok(String::from_utf8(output.stdout)?.trim().to_string())
 }
 
-#[derive(Debug, PartialEq)]
-struct LongPressScrollPlan {
-    start_nx: f64,
-    start_ny: f64,
-    end_nx: f64,
-    end_ny: f64,
-    hold: Duration,
-    steps: u64,
-}
-
-fn long_press_scroll_plan(value: &serde_json::Value) -> LongPressScrollPlan {
-    let direction = value
-        .get("direction")
-        .and_then(|value| value.as_str())
-        .unwrap_or("up");
-    let distance = value
-        .get("distance")
-        .and_then(|value| value.as_f64())
-        .unwrap_or(0.5)
-        .clamp(0.05, 1.0);
-    let default_x = match direction {
-        "left" => 1.0 - (distance / 2.0),
-        "right" => distance / 2.0,
-        _ => 0.5,
-    };
-    let default_y = match direction {
-        "down" => distance / 2.0,
-        "left" | "right" => 0.5,
-        _ => 1.0 - (distance / 2.0),
-    };
-    let at = value.get("at").unwrap_or(value);
-    let start_nx = at
-        .get("nx")
-        .and_then(|value| value.as_f64())
-        .unwrap_or(default_x)
-        .clamp(0.0, 1.0);
-    let start_ny = at
-        .get("ny")
-        .and_then(|value| value.as_f64())
-        .unwrap_or(default_y)
-        .clamp(0.0, 1.0);
-    let (delta_x, delta_y) = match direction {
-        "down" => (0.0, distance),
-        "left" => (-distance, 0.0),
-        "right" => (distance, 0.0),
-        _ => (0.0, -distance),
-    };
-    let hold_ms = value
-        .get("holdMs")
-        .or_else(|| value.get("hold_ms"))
-        .and_then(|value| value.as_u64())
-        .unwrap_or(500)
-        .clamp(0, 3_000);
-    let steps = value
-        .get("steps")
-        .and_then(|value| value.as_u64())
-        .unwrap_or(12)
-        .clamp(2, 60);
-
-    LongPressScrollPlan {
-        start_nx,
-        start_ny,
-        end_nx: (start_nx + delta_x).clamp(0.0, 1.0),
-        end_ny: (start_ny + delta_y).clamp(0.0, 1.0),
-        hold: Duration::from_millis(hold_ms),
-        steps,
-    }
-}
-
 #[cfg(target_os = "macos")]
 fn native_bool_result(ok: i32, error: *mut c_char) -> anyhow::Result<()> {
     if ok != 0 {
@@ -1975,68 +1573,6 @@ fn native_bool_result(ok: i32, error: *mut c_char) -> anyhow::Result<()> {
         }
     };
     bail!("{message}");
-}
-
-fn browser_code_to_hid(code: &str) -> Option<u16> {
-    match code {
-        "KeyA" => Some(0x04),
-        "KeyB" => Some(0x05),
-        "KeyC" => Some(0x06),
-        "KeyD" => Some(0x07),
-        "KeyE" => Some(0x08),
-        "KeyF" => Some(0x09),
-        "KeyG" => Some(0x0a),
-        "KeyH" => Some(0x0b),
-        "KeyI" => Some(0x0c),
-        "KeyJ" => Some(0x0d),
-        "KeyK" => Some(0x0e),
-        "KeyL" => Some(0x0f),
-        "KeyM" => Some(0x10),
-        "KeyN" => Some(0x11),
-        "KeyO" => Some(0x12),
-        "KeyP" => Some(0x13),
-        "KeyQ" => Some(0x14),
-        "KeyR" => Some(0x15),
-        "KeyS" => Some(0x16),
-        "KeyT" => Some(0x17),
-        "KeyU" => Some(0x18),
-        "KeyV" => Some(0x19),
-        "KeyW" => Some(0x1a),
-        "KeyX" => Some(0x1b),
-        "KeyY" => Some(0x1c),
-        "KeyZ" => Some(0x1d),
-        "Digit1" => Some(0x1e),
-        "Digit2" => Some(0x1f),
-        "Digit3" => Some(0x20),
-        "Digit4" => Some(0x21),
-        "Digit5" => Some(0x22),
-        "Digit6" => Some(0x23),
-        "Digit7" => Some(0x24),
-        "Digit8" => Some(0x25),
-        "Digit9" => Some(0x26),
-        "Digit0" => Some(0x27),
-        "Enter" => Some(0x28),
-        "Escape" => Some(0x29),
-        "Backspace" => Some(0x2a),
-        "Tab" => Some(0x2b),
-        "Space" => Some(0x2c),
-        "Minus" => Some(0x2d),
-        "Equal" => Some(0x2e),
-        "BracketLeft" => Some(0x2f),
-        "BracketRight" => Some(0x30),
-        "Backslash" => Some(0x31),
-        "Semicolon" => Some(0x33),
-        "Quote" => Some(0x34),
-        "Backquote" => Some(0x35),
-        "Comma" => Some(0x36),
-        "Period" => Some(0x37),
-        "Slash" => Some(0x38),
-        "ArrowRight" => Some(0x4f),
-        "ArrowLeft" => Some(0x50),
-        "ArrowDown" => Some(0x51),
-        "ArrowUp" => Some(0x52),
-        _ => None,
-    }
 }
 
 #[cfg(target_os = "macos")]
@@ -2062,6 +1598,7 @@ extern "C" {
             ),
         >,
         encoded_callback_context: *mut c_void,
+        hid_timeout_ms: i32,
         error: *mut *mut c_char,
     ) -> *mut c_void;
     fn simx_frame_stream_stop(handle: *mut c_void);
@@ -2347,14 +1884,13 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        acquire_controller, char_to_hid, claim_controller, h264_codec_string, h264_stream_path,
-        input_ack, is_claim_control_message, is_keyframe_request_message, is_resume_message,
-        is_unacknowledged_touch_move, lease_is_active, long_press_scroll_plan, parse_next_ws_event,
-        slug_path, slug_path_slash, stats_path, stream_path, websocket_accept, EncodedFrame,
+        acquire_controller, claim_controller, h264_codec_string, h264_stream_path, input_ack,
+        is_claim_control_message, is_keyframe_request_message, is_resume_message,
+        is_unacknowledged_touch_move, lease_is_active, parse_next_ws_event, slug_path,
+        slug_path_slash, stats_path, stream_path, websocket_accept, EncodedFrame,
         EncodedFrameContext, EncodedFrameSource, LatestEncodedFrame, NativeFrameSource,
         ServeConfig, StreamControlMode, StreamStats, StreamTransport, WsEvent,
     };
-    use serde_json::json;
     use tempfile::TempDir;
 
     #[test]
@@ -2460,70 +1996,6 @@ mod tests {
         assert!(ack.contains(r#""id":"msg-1""#));
         assert!(ack.contains(r#""ok":true"#));
         assert!(input_ack(r#"{"type":"paste","id":"msg-1"}"#, true, "ok").is_none());
-    }
-
-    #[test]
-    fn paste_character_mapping_marks_shifted_characters() {
-        assert_eq!(char_to_hid('m'), Some((0x10, false)));
-        assert_eq!(char_to_hid('M'), Some((0x10, true)));
-        assert_eq!(char_to_hid('?'), Some((0x38, true)));
-    }
-
-    #[test]
-    fn long_press_scroll_defaults_drag_up_from_lower_screen() {
-        let plan = long_press_scroll_plan(&json!({
-            "type": "longPressScroll",
-            "direction": "up"
-        }));
-
-        assert_eq!(plan.start_nx, 0.5);
-        assert_eq!(plan.start_ny, 0.75);
-        assert_eq!(plan.end_nx, 0.5);
-        assert_eq!(plan.end_ny, 0.25);
-        assert_eq!(plan.hold, Duration::from_millis(500));
-        assert_eq!(plan.steps, 12);
-    }
-
-    #[test]
-    fn long_press_scroll_accepts_down_direction_and_clamps_options() {
-        let plan = long_press_scroll_plan(&json!({
-            "type": "longPressScroll",
-            "direction": "down",
-            "at": { "nx": 2.0, "ny": -1.0 },
-            "distance": 2.0,
-            "holdMs": 5_000,
-            "steps": 99
-        }));
-
-        assert_eq!(plan.start_nx, 1.0);
-        assert_eq!(plan.start_ny, 0.0);
-        assert_eq!(plan.end_nx, 1.0);
-        assert_eq!(plan.end_ny, 1.0);
-        assert_eq!(plan.hold, Duration::from_millis(3_000));
-        assert_eq!(plan.steps, 60);
-    }
-
-    #[test]
-    fn long_press_scroll_supports_horizontal_directions() {
-        let left = long_press_scroll_plan(&json!({
-            "type": "longPressScroll",
-            "direction": "left",
-            "distance": 0.4
-        }));
-        let right = long_press_scroll_plan(&json!({
-            "type": "longPressScroll",
-            "direction": "right",
-            "distance": 0.4
-        }));
-
-        assert_float_eq(left.start_nx, 0.8);
-        assert_float_eq(left.start_ny, 0.5);
-        assert_float_eq(left.end_nx, 0.4);
-        assert_float_eq(left.end_ny, 0.5);
-        assert_float_eq(right.start_nx, 0.2);
-        assert_float_eq(right.start_ny, 0.5);
-        assert_float_eq(right.end_nx, 0.6);
-        assert_float_eq(right.end_ny, 0.5);
     }
 
     #[test]
@@ -2828,12 +2300,5 @@ mod tests {
             stats: Arc::new(Mutex::new(StreamStats::default())),
             controllers: Arc::new(Mutex::new(None)),
         }
-    }
-
-    fn assert_float_eq(actual: f64, expected: f64) {
-        assert!(
-            (actual - expected).abs() < f64::EPSILON,
-            "expected {actual} to equal {expected}"
-        );
     }
 }
