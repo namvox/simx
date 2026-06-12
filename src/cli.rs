@@ -32,6 +32,10 @@ use crate::update::{self, UpdateHint, UpdateOptions};
 One-shot browser stream:
   simx lease --slug browser --serve --port 8080 --idle-timeout 5m
 
+Native control:
+  simx control snapshot --slug browser --json
+  simx control tap --slug browser --nx 0.5 --ny 0.5 --json
+
 Open:
   http://127.0.0.1:8080/browser
   ws://127.0.0.1:8080/browser/stream       (JPEG)
@@ -222,7 +226,19 @@ Notes:
         #[arg(long)]
         json: bool,
     },
-    /// Observe and control a served simulator through the stream WebSocket.
+    /// Observe and control an active leased simulator with native commands.
+    #[command(after_help = "Examples:
+  simx control snapshot --slug browser --json
+  simx control snapshot --slug browser --output snapshot.jpg --json
+  simx control tap --slug browser --nx 0.5 --ny 0.5 --json
+  simx control swipe --slug browser --from-nx 0.5 --from-ny 0.8 --to-nx 0.5 --to-ny 0.2 --json
+  simx control paste --slug browser --text \"hello\" --json
+  simx control button --slug browser home --json
+
+Notes:
+  Control commands operate on an active lease by slug.
+  They use a short-lived native SimulatorKit session and do not require `simx serve`.
+  Normalized coordinates use 0.0..1.0 with (0,0) at the top-left.")]
     Control {
         #[command(subcommand)]
         command: ControlCommand,
@@ -323,122 +339,196 @@ enum CliControlMode {
 
 #[derive(Debug, Subcommand)]
 enum ControlCommand {
-    /// Capture the next streamed JPEG frame without printing image bytes by default.
+    /// Capture a simulator JPEG snapshot without printing image bytes by default.
+    #[command(after_help = "Examples:
+  simx control snapshot --slug browser --json
+  simx control snapshot --slug browser --output snapshot.jpg --json
+  simx control snapshot --slug browser --inline-base64 --json
+
+Notes:
+  The default JSON output is metadata-only and token-efficient.
+  Use --output to write image bytes to disk, or --inline-base64 only when bytes are required.")]
     Snapshot {
+        /// Active lease owner name to observe.
         #[arg(long)]
         slug: String,
+        /// File path where the JPEG snapshot should be written.
         #[arg(long)]
         output: Option<PathBuf>,
+        /// Include JPEG bytes as base64 in JSON output.
         #[arg(long)]
         inline_base64: bool,
+        /// How long to wait for the native snapshot frame.
         #[arg(long, default_value = "5s", value_parser = parse_duration)]
         wait_timeout: Duration,
+        /// Print machine-readable snapshot metadata.
         #[arg(long)]
         json: bool,
     },
     /// Send a tap as touch began + touch ended.
+    #[command(after_help = "Example:
+  simx control tap --slug browser --nx 0.5 --ny 0.5 --json")]
     Tap {
+        /// Active lease owner name to control.
         #[arg(long)]
         slug: String,
+        /// Normalized horizontal coordinate, 0.0 left to 1.0 right.
         #[arg(long)]
         nx: f64,
+        /// Normalized vertical coordinate, 0.0 top to 1.0 bottom.
         #[arg(long)]
         ny: f64,
+        /// How long to wait for the native HID session.
         #[arg(long, default_value = "5s", value_parser = parse_duration)]
         wait_timeout: Duration,
+        /// Print machine-readable acknowledgement details.
         #[arg(long)]
         json: bool,
     },
     /// Send one touch phase.
+    #[command(after_help = "Examples:
+  simx control touch --slug browser --phase began --nx 0.5 --ny 0.5 --json
+  simx control touch --slug browser --phase ended --nx 0.5 --ny 0.5 --json")]
     Touch {
+        /// Active lease owner name to control.
         #[arg(long)]
         slug: String,
+        /// Touch phase to send.
         #[arg(long, value_enum)]
         phase: TouchPhase,
+        /// Normalized horizontal coordinate, 0.0 left to 1.0 right.
         #[arg(long)]
         nx: f64,
+        /// Normalized vertical coordinate, 0.0 top to 1.0 bottom.
         #[arg(long)]
         ny: f64,
+        /// How long to wait for the native HID session.
         #[arg(long, default_value = "5s", value_parser = parse_duration)]
         wait_timeout: Duration,
+        /// Print machine-readable acknowledgement details.
         #[arg(long)]
         json: bool,
     },
     /// Send a swipe helper message.
+    #[command(after_help = "Example:
+  simx control swipe --slug browser --from-nx 0.5 --from-ny 0.8 --to-nx 0.5 --to-ny 0.2 --json")]
     Swipe {
+        /// Active lease owner name to control.
         #[arg(long)]
         slug: String,
+        /// Normalized start X coordinate, 0.0 left to 1.0 right.
         #[arg(long)]
         from_nx: f64,
+        /// Normalized start Y coordinate, 0.0 top to 1.0 bottom.
         #[arg(long)]
         from_ny: f64,
+        /// Normalized end X coordinate, 0.0 left to 1.0 right.
         #[arg(long)]
         to_nx: f64,
+        /// Normalized end Y coordinate, 0.0 top to 1.0 bottom.
         #[arg(long)]
         to_ny: f64,
+        /// Number of intermediate move steps.
         #[arg(long)]
         steps: Option<u32>,
+        /// How long to wait for the native HID session.
         #[arg(long, default_value = "5s", value_parser = parse_duration)]
         wait_timeout: Duration,
+        /// Print machine-readable acknowledgement details.
         #[arg(long)]
         json: bool,
     },
     /// Send a drag helper message.
+    #[command(after_help = "Example:
+  simx control drag --slug browser --from-nx 0.2 --from-ny 0.2 --to-nx 0.8 --to-ny 0.8 --json")]
     Drag {
+        /// Active lease owner name to control.
         #[arg(long)]
         slug: String,
+        /// Normalized start X coordinate, 0.0 left to 1.0 right.
         #[arg(long)]
         from_nx: f64,
+        /// Normalized start Y coordinate, 0.0 top to 1.0 bottom.
         #[arg(long)]
         from_ny: f64,
+        /// Normalized end X coordinate, 0.0 left to 1.0 right.
         #[arg(long)]
         to_nx: f64,
+        /// Normalized end Y coordinate, 0.0 top to 1.0 bottom.
         #[arg(long)]
         to_ny: f64,
+        /// Number of intermediate move steps.
         #[arg(long)]
         steps: Option<u32>,
+        /// How long to wait for the native HID session.
         #[arg(long, default_value = "5s", value_parser = parse_duration)]
         wait_timeout: Duration,
+        /// Print machine-readable acknowledgement details.
         #[arg(long)]
         json: bool,
     },
     /// Send a key down/up pair for a browser KeyboardEvent.code value.
+    #[command(after_help = "Example:
+  simx control key --slug browser --code KeyA --json")]
     Key {
+        /// Active lease owner name to control.
         #[arg(long)]
         slug: String,
+        /// Browser KeyboardEvent.code value, for example KeyA or Enter.
         #[arg(long)]
         code: String,
+        /// How long to wait for the native HID session.
         #[arg(long, default_value = "5s", value_parser = parse_duration)]
         wait_timeout: Duration,
+        /// Print machine-readable acknowledgement details.
         #[arg(long)]
         json: bool,
     },
     /// Type supported text through simulated key events.
+    #[command(after_help = "Example:
+  simx control paste --slug browser --text \"hello\" --json")]
     Paste {
+        /// Active lease owner name to control.
         #[arg(long)]
         slug: String,
+        /// Text to type through simulated key events.
         #[arg(long)]
         text: String,
+        /// How long to wait for the native HID session.
         #[arg(long, default_value = "5s", value_parser = parse_duration)]
         wait_timeout: Duration,
+        /// Print machine-readable acknowledgement details.
         #[arg(long)]
         json: bool,
     },
     /// Press a hardware button.
+    #[command(after_help = "Example:
+  simx control button --slug browser home --json")]
     Button {
+        /// Active lease owner name to control.
         #[arg(long)]
         slug: String,
+        /// Hardware button to press.
         #[arg(value_enum)]
         button: ControlButton,
+        /// How long to wait for the native HID session.
         #[arg(long, default_value = "5s", value_parser = parse_duration)]
         wait_timeout: Duration,
+        /// Print machine-readable acknowledgement details.
         #[arg(long)]
         json: bool,
     },
     /// Return a simulator accessibility tree when a supported provider exists.
+    #[command(after_help = "Example:
+  simx control tree --slug browser --json
+
+Notes:
+  This command is reserved for a future accessibility provider and is not a stable data contract yet.")]
     Tree {
+        /// Active lease owner name to inspect.
         #[arg(long)]
         slug: String,
+        /// Print machine-readable tree details or unsupported-provider errors.
         #[arg(long)]
         json: bool,
     },
