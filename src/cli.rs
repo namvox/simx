@@ -22,7 +22,20 @@ use crate::update::{self, UpdateHint, UpdateOptions};
 #[command(
     name = "simx",
     version,
-    about = "Agent-friendly iOS Simulator device pool"
+    about = "Agent-friendly iOS Simulator device pool",
+    after_help = "Agent quick start:
+  simx doctor --json
+  simx init --size 2
+  simx lease --slug browser --ttl 10m --json
+  simx serve --slug browser --port 8080
+
+One-shot browser stream:
+  simx lease --slug browser --serve --port 8080 --idle-timeout 5m
+
+Open:
+  http://127.0.0.1:8080/browser
+  ws://127.0.0.1:8080/browser/stream
+  http://127.0.0.1:8080/browser/stats"
 )]
 struct Cli {
     /// Print CLI errors as stable JSON.
@@ -38,101 +51,172 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Initialize or reconcile the fixed simulator pool.
+    #[command(after_help = "Examples:
+  simx init --size 2
+  simx init --size 4 --device-type \"iPhone 16\"")]
     Init {
+        /// Number of managed simulator devices to keep in the pool.
         #[arg(long)]
         size: usize,
+        /// Simulator device type name to create when the pool needs devices.
         #[arg(long)]
         device_type: Option<String>,
+        /// Simulator runtime name or identifier to create when the pool needs devices.
         #[arg(long)]
         runtime: Option<String>,
     },
     /// Show the current pool state.
     Status {
+        /// Print machine-readable pool state.
         #[arg(long)]
         json: bool,
     },
     /// Lease a simulator for an agent.
+    #[command(after_help = "Examples:
+  simx lease --slug browser --ttl 10m --json
+  simx lease --slug browser --serve --port 8080 --idle-timeout 5m
+  simx lease --slug browser --serve --port 8080 --fps 120 --transport h264
+  simx lease --slug browser --new --json
+
+Notes:
+  Reusing a slug renews and reuses its active lease unless --new is set.
+  With --serve, open http://<host>:<port>/<slug> in a browser.")]
     Lease {
+        /// Stable lease owner name. Reusing the same slug renews/reuses the lease.
         #[arg(long)]
         slug: String,
+        /// How long to wait for an idle simulator before failing.
         #[arg(long, default_value = "60s", value_parser = parse_duration)]
         wait_timeout: Duration,
+        /// Lease lifetime before the simulator can be reclaimed.
         #[arg(long, default_value = "30m", value_parser = parse_duration)]
         ttl: Duration,
+        /// Print machine-readable lease details including URL, stream URL, and stats URL.
         #[arg(long)]
         json: bool,
+        /// Start the browser/WebSocket server after acquiring the lease.
         #[arg(long)]
         serve: bool,
+        /// Host interface for the browser/WebSocket server when --serve is set.
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
+        /// Port for the browser/WebSocket server when --serve is set.
         #[arg(long, default_value_t = 8080)]
         port: u16,
+        /// JPEG quality for streamed frames, from 0.0 to 1.0.
         #[arg(long, default_value_t = 0.7)]
         quality: f32,
+        /// Target stream frames per second.
         #[arg(long, default_value_t = 60)]
         fps: u32,
+        /// Stream transport to serve to browsers.
         #[arg(long, value_enum, default_value = "jpeg")]
         transport: CliTransport,
+        /// Browser input ownership policy for the served simulator.
         #[arg(long, value_enum, default_value = "read-only")]
         control_mode: CliControlMode,
+        /// Stop the server after this much time without viewer activity.
         #[arg(long, default_value = "5m", value_parser = parse_duration)]
         idle_timeout: Duration,
+        /// Force a fresh lease instead of reusing an active lease for the same slug.
         #[arg(long)]
         new: bool,
     },
     /// Release a simulator lease back to the pool.
     Release {
+        /// Lease owner name to release.
         #[arg(long)]
         slug: String,
     },
     /// Serve an existing active lease.
+    #[command(after_help = "Examples:
+  simx serve --slug browser --port 8080
+  simx serve --slug browser --transport h264 --fps 120
+  simx serve --slug browser --control-mode single-controller
+
+Viewer:
+  http://127.0.0.1:<port>/<slug>
+  ws://127.0.0.1:<port>/<slug>/stream
+  http://127.0.0.1:<port>/<slug>/stats")]
     Serve {
+        /// Active lease owner name to serve.
         #[arg(long)]
         slug: String,
+        /// Host interface for the browser/WebSocket server.
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
+        /// Port for the browser/WebSocket server.
         #[arg(long, default_value_t = 8080)]
         port: u16,
+        /// JPEG quality for streamed frames, from 0.0 to 1.0.
         #[arg(long, default_value_t = 0.7)]
         quality: f32,
+        /// Target stream frames per second.
         #[arg(long, default_value_t = 60)]
         fps: u32,
+        /// Stream transport to serve to browsers.
         #[arg(long, value_enum, default_value = "jpeg")]
         transport: CliTransport,
+        /// Browser input ownership policy for the served simulator.
         #[arg(long, value_enum, default_value = "read-only")]
         control_mode: CliControlMode,
+        /// Stop the server after this much time without viewer activity.
         #[arg(long, default_value = "5m", value_parser = parse_duration)]
         idle_timeout: Duration,
     },
     /// Build, install, and launch the app in the current Xcode project.
+    #[command(after_help = "Examples:
+  simx run --slug browser --json
+  simx run --slug browser --scheme MyApp --configuration Debug --json
+  simx run --slug browser --project path/to/App.xcodeproj --json
+
+Notes:
+  Run from a folder containing one .xcodeproj, or pass --project.
+  Build logs are written under .simx/logs/ and run metadata under .simx/run.json.")]
     Run {
+        /// Active lease owner name to build, install, and launch on.
         #[arg(long)]
         slug: String,
+        /// Xcode project path. Defaults to the only .xcodeproj in the current folder.
         #[arg(long)]
         project: Option<PathBuf>,
+        /// Xcode scheme to build. Defaults to the discovered project scheme.
         #[arg(long)]
         scheme: Option<String>,
+        /// Xcode build configuration.
         #[arg(long, default_value = "Debug")]
         configuration: String,
+        /// DerivedData directory to use for the build.
         #[arg(long)]
         derived_data_path: Option<PathBuf>,
+        /// Bundle identifier to launch. Defaults to CFBundleIdentifier from Info.plist.
         #[arg(long)]
         bundle_id: Option<String>,
+        /// Install the app but do not launch it.
         #[arg(long)]
         no_launch: bool,
+        /// Print machine-readable build, install, and launch details.
         #[arg(long)]
         json: bool,
     },
     /// Install and launch an app bundle on an active lease.
+    #[command(after_help = "Examples:
+  simx install --slug browser --app path/to/App.app --json
+  simx install --slug browser --app path/to/App.app --bundle-id com.example.App --json")]
     Install {
+        /// Active lease owner name to install on.
         #[arg(long)]
         slug: String,
+        /// Path to the .app bundle to install.
         #[arg(long)]
         app: PathBuf,
+        /// Bundle identifier to launch. Defaults to CFBundleIdentifier from Info.plist.
         #[arg(long)]
         bundle_id: Option<String>,
+        /// Install the app but do not launch it.
         #[arg(long)]
         no_launch: bool,
+        /// Print machine-readable install and launch details.
         #[arg(long)]
         json: bool,
     },
@@ -143,21 +227,28 @@ enum Command {
     },
     /// Check for or install the latest simx release binary.
     Update {
+        /// Only check whether an update is available.
         #[arg(long)]
         check: bool,
+        /// Install a specific release version instead of the latest release.
         #[arg(long)]
         version: Option<String>,
+        /// Directory where the simx binary should be installed.
         #[arg(long)]
         install_dir: Option<PathBuf>,
+        /// Print machine-readable update details.
         #[arg(long)]
         json: bool,
     },
     /// Extend an active simulator lease.
     Renew {
+        /// Active lease owner name to renew.
         #[arg(long)]
         slug: String,
+        /// New lease lifetime from now.
         #[arg(long, default_value = "30m", value_parser = parse_duration)]
         ttl: Duration,
+        /// Print machine-readable renewal details.
         #[arg(long)]
         json: bool,
     },
@@ -165,6 +256,7 @@ enum Command {
     Clean,
     /// Check host tooling required by simx.
     Doctor {
+        /// Print machine-readable host diagnostics.
         #[arg(long)]
         json: bool,
     },

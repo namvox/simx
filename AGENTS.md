@@ -63,6 +63,9 @@ http://127.0.0.1:8080/browser/stats
 - Prefer focused tests for pool state transitions and WebSocket protocol behavior.
 - For every pull request, follow `.github/PULL_REQUEST_TEMPLATE.md`. The PR body should explicitly cover Summary, Type, Stable Contract Impact, Verification, Simulator And Streaming Notes, Screenshots Or Demo, and Release Notes.
 - Stable CLI, JSON, WebSocket, and HID changes must reference `docs/api-stability.md` and update the relevant docs in the same PR.
+- When changing the command interface, update the relevant `--help` text in the same PR. This includes adding, removing, renaming, or changing commands, flags, defaults, JSON-facing options, server URLs, transport/control modes, and common workflows.
+- Agent-facing workflows should be discoverable from `simx --help` or `simx <command> --help`; do not rely only on external docs for basic usage.
+- Verification for command interface changes should include checking `simx --help` and each touched subcommand's `--help` output.
 - Verification should match the change:
   - Documentation/template-only changes may say no Rust checks were required.
   - Code changes should run `cargo fmt --check`, `cargo test`, and `cargo clippy -- -D warnings`, or `make check`.
