@@ -26,6 +26,8 @@ simx clean
 simx doctor
 simx run
 simx install
+simx screenshot
+simx record-video
 simx update
 simx control
 ```
@@ -64,6 +66,8 @@ simx renew --json
 simx doctor --json
 simx run --json
 simx install --json
+simx screenshot --json
+simx record-video --json
 simx update --json
 simx control snapshot --json
 simx control tap --json
@@ -243,6 +247,22 @@ SimulatorKit session. They do not require `simx serve`, do not use
 or `--inline-base64` is requested. WebSocket control modes and `claimControl`
 apply only to ordinary browser/WebSocket stream clients, not to local CLI
 control commands.
+
+Stable media capture commands:
+
+```text
+simx screenshot --slug <slug> --output <path> --json
+simx record-video --slug <slug> --output <path> --duration <duration> --json
+```
+
+These commands require an active lease and boot the leased simulator if needed.
+`simx screenshot` writes a PNG file through `xcrun simctl io screenshot`.
+`simx record-video` writes a bounded MP4 file through `xcrun simctl io
+recordVideo`, stops recording after `--duration`, and waits for the file to
+finalize. Both commands reject existing output files unless `--force` is set.
+
+Their JSON output includes stable `slug`, `udid`, `output`, and `bytes` fields.
+`simx record-video --json` also includes `duration_seconds`.
 
 Experimental agent control commands:
 

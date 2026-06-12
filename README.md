@@ -61,8 +61,8 @@ See [docs/compatibility.md](docs/compatibility.md) for compatibility details.
 ## Stability
 
 `simx` uses semantic versioning. The stable surface includes the pool, lease,
-serve, release, clean, doctor, run, install, update, and control commands, plus
-JSON output for agent-facing commands. Browser streaming's stable surface
+serve, release, clean, doctor, run, install, screenshot, record-video, update,
+and control commands, plus JSON output for agent-facing commands. Browser streaming's stable surface
 includes the serve CLI, default JPEG/WebSocket stream, stats endpoint,
 WebSocket HID/control protocol, and control modes. `simx preview` is an
 experimental SwiftUI-preview hot-reload workflow. See
@@ -280,12 +280,20 @@ simx control swipe --slug browser-preview --from-nx 0.5 --from-ny 0.8 --to-nx 0.
 simx control key --slug browser-preview --code KeyA --json
 simx control paste --slug browser-preview --text "hello" --json
 simx control button --slug browser-preview home --json
+simx screenshot --slug browser-preview --output screenshot.png --json
+simx record-video --slug browser-preview --output demo.mp4 --duration 10s --json
 ```
 
 `simx control snapshot --json` is token-efficient by default: it returns frame
 metadata, dimensions when available, a hash, and estimated inline-image token
 cost without printing base64 image bytes. Use `--output` to write the JPEG frame
 or `--inline-base64` only when an inline image payload is required.
+
+Use `simx screenshot` for a one-shot PNG file from `xcrun simctl io screenshot`.
+Use `simx record-video` for a bounded MP4 recording; simx stops recording after
+`--duration` and waits for `simctl` to finalize the file. Both commands require
+an active lease, boot the leased simulator if needed, support `--force` for
+overwriting output files, and return file metadata with `--json`.
 
 `simx control` opens a short-lived native SimulatorKit session for the leased
 simulator. It does not use the served WebSocket stream, and it does not send

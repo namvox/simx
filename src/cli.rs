@@ -1,8 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command as ProcessCommand;
+use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -39,6 +40,8 @@ SwiftUI preview hot reload:
 Native control:
   simx control snapshot --slug browser --json
   simx control tap --slug browser --nx 0.5 --ny 0.5 --json
+  simx screenshot --slug browser --output screenshot.png --json
+  simx record-video --slug browser --output demo.mp4 --duration 10s --json
 
 Open:
   http://127.0.0.1:8080/browser
@@ -269,6 +272,51 @@ Notes:
         #[arg(long)]
         no_launch: bool,
         /// Print machine-readable install and launch details.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Save a PNG screenshot from an active leased simulator.
+    #[command(after_help = "Example:
+  simx screenshot --slug browser --output screenshot.png --json
+
+Notes:
+  Requires an active lease. This is a one-shot capture command for agents and
+  does not use the browser streaming pipeline.")]
+    Screenshot {
+        /// Active lease owner name to capture.
+        #[arg(long)]
+        slug: String,
+        /// File path where the PNG screenshot should be written.
+        #[arg(long)]
+        output: PathBuf,
+        /// Overwrite the output file if it already exists.
+        #[arg(long)]
+        force: bool,
+        /// Print machine-readable capture details.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Record a bounded MP4 video from an active leased simulator.
+    #[command(after_help = "Example:
+  simx record-video --slug browser --output demo.mp4 --duration 10s --json
+
+Notes:
+  Requires an active lease. simx stops recording after --duration and waits for
+  simctl to finalize the video file.")]
+    RecordVideo {
+        /// Active lease owner name to capture.
+        #[arg(long)]
+        slug: String,
+        /// File path where the MP4 video should be written.
+        #[arg(long)]
+        output: PathBuf,
+        /// Recording duration before simx stops simctl recordVideo.
+        #[arg(long, default_value = "10s", value_parser = parse_duration)]
+        duration: Duration,
+        /// Overwrite the output file if it already exists.
+        #[arg(long)]
+        force: bool,
+        /// Print machine-readable capture details.
         #[arg(long)]
         json: bool,
     },
@@ -677,6 +725,18 @@ struct InstallOutput<'a> {
 }
 
 #[derive(Debug, Serialize)]
+struct MediaCaptureOutput<'a> {
+    slug: &'a str,
+    udid: &'a str,
+    output: String,
+    bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    update: Option<UpdateHint>,
+}
+
+#[derive(Debug, Serialize)]
 struct ErrorOutput<'a> {
     ok: bool,
     code: &'a str,
@@ -975,6 +1035,39 @@ fn run_with(cli: Cli, state_path: PathBuf) -> anyhow::Result<()> {
                 &app,
                 bundle_id,
                 !no_launch,
+                json,
+                update_hint,
+            )?;
+        }
+        Command::Screenshot {
+            slug,
+            output,
+            force,
+            json,
+        } => {
+            let device = service.active_lease(&slug)?;
+            simctl
+                .boot_if_needed(&device.udid)
+                .with_context(|| format!("failed to boot {}", device.udid))?;
+            screenshot_command(&slug, &device.udid, &output, force, json, update_hint)?;
+        }
+        Command::RecordVideo {
+            slug,
+            output,
+            duration,
+            force,
+            json,
+        } => {
+            let device = service.active_lease(&slug)?;
+            simctl
+                .boot_if_needed(&device.udid)
+                .with_context(|| format!("failed to boot {}", device.udid))?;
+            record_video_command(
+                &slug,
+                &device.udid,
+                &output,
+                duration,
+                force,
                 json,
                 update_hint,
             )?;
@@ -1517,6 +1610,154 @@ fn install_app_command(
         if launch {
             println!("launched {bundle_id}");
         }
+    }
+    Ok(())
+}
+
+fn screenshot_command(
+    slug: &str,
+    udid: &str,
+    output: &Path,
+    force: bool,
+    json: bool,
+    update: Option<UpdateHint>,
+) -> anyhow::Result<()> {
+    prepare_media_output(output, force)?;
+    let output_string = output.display().to_string();
+    if json {
+        let process_output = ProcessCommand::new("/usr/bin/xcrun")
+            .args(["simctl", "io", udid, "screenshot"])
+            .arg(output)
+            .output()
+            .context("failed to run xcrun simctl io screenshot")?;
+        if !process_output.status.success() {
+            anyhow::bail!(
+                "simctl io screenshot failed: {}",
+                String::from_utf8_lossy(&process_output.stderr).trim()
+            );
+        }
+    } else {
+        let status = ProcessCommand::new("/usr/bin/xcrun")
+            .args(["simctl", "io", udid, "screenshot"])
+            .arg(output)
+            .status()
+            .context("failed to run xcrun simctl io screenshot")?;
+        if !status.success() {
+            anyhow::bail!("simctl io screenshot failed");
+        }
+    }
+    print_media_capture_output(slug, udid, &output_string, None, json, update)
+}
+
+fn record_video_command(
+    slug: &str,
+    udid: &str,
+    output: &Path,
+    duration: Duration,
+    force: bool,
+    json: bool,
+    update: Option<UpdateHint>,
+) -> anyhow::Result<()> {
+    if duration.is_zero() {
+        anyhow::bail!("duration must be greater than zero");
+    }
+    prepare_media_output(output, force)?;
+    let output_string = output.display().to_string();
+    let mut command = ProcessCommand::new("/usr/bin/xcrun");
+    command
+        .args(["simctl", "io", udid, "recordVideo"])
+        .arg(output);
+    if json {
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    let mut child = command
+        .spawn()
+        .context("failed to run xcrun simctl io recordVideo")?;
+    let started = Instant::now();
+    while started.elapsed() < duration {
+        thread::sleep((duration - started.elapsed()).min(Duration::from_millis(250)));
+        if let Some(status) = child
+            .try_wait()
+            .context("failed to poll simctl io recordVideo")?
+        {
+            if status.success() {
+                break;
+            }
+            anyhow::bail!("simctl io recordVideo failed");
+        }
+    }
+    if child
+        .try_wait()
+        .context("failed to poll simctl io recordVideo")?
+        .is_none()
+    {
+        let kill_status = ProcessCommand::new("/bin/kill")
+            .args(["-INT", &child.id().to_string()])
+            .status()
+            .context("failed to stop simctl io recordVideo")?;
+        if !kill_status.success() {
+            let _ = child.kill();
+            anyhow::bail!("failed to stop simctl io recordVideo");
+        }
+    }
+    let status = child
+        .wait()
+        .context("failed to wait for simctl io recordVideo")?;
+    if !status.success() {
+        anyhow::bail!("simctl io recordVideo failed");
+    }
+    print_media_capture_output(
+        slug,
+        udid,
+        &output_string,
+        Some(duration.as_secs()),
+        json,
+        update,
+    )
+}
+
+fn prepare_media_output(output: &Path, force: bool) -> anyhow::Result<()> {
+    if output.exists() {
+        if force {
+            fs::remove_file(output)
+                .with_context(|| format!("failed to remove {}", output.display()))?;
+        } else {
+            anyhow::bail!("output file already exists: {}", output.display());
+        }
+    }
+    if let Some(parent) = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    Ok(())
+}
+
+fn print_media_capture_output(
+    slug: &str,
+    udid: &str,
+    output: &str,
+    duration_seconds: Option<u64>,
+    json: bool,
+    update: Option<UpdateHint>,
+) -> anyhow::Result<()> {
+    let bytes = fs::metadata(output)
+        .with_context(|| format!("failed to inspect {output}"))?
+        .len();
+    if json {
+        let output = MediaCaptureOutput {
+            slug,
+            udid,
+            output: output.to_string(),
+            bytes,
+            duration_seconds,
+            update,
+        };
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!("saved {output} ({bytes} bytes)");
     }
     Ok(())
 }

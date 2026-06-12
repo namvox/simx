@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add `simx screenshot` and `simx record-video` for lease-scoped simulator
+  media capture with JSON file metadata.
 - Add experimental `simx preview` for Swift Package-backed SwiftUI previews with
   host-app hot reload on an active leased simulator.
 - Add H.264 stress-scene benchmark runner coverage for simulator-visible
