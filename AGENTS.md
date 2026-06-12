@@ -31,6 +31,11 @@ Streaming:
 ```sh
 simx lease --slug browser --serve --port 8080 --idle-timeout 5m
 simx lease --slug browser --serve --port 8080 --fps 120 --idle-timeout 5m
+simx lease --slug browser --serve --port 8080 --transport h264
+simx lease --slug browser --serve --port 8080 --transport webrtc
+simx serve --slug browser --port 8080 --control-mode single-controller
+simx serve --slug browser --port 8080 --control-mode claim
+simx serve --slug browser --port 8080 --control-mode shared
 ```
 
 Open:
@@ -39,6 +44,11 @@ Open:
 http://127.0.0.1:8080/browser
 ws://127.0.0.1:8080/browser/stream
 http://127.0.0.1:8080/browser/stats
+http://127.0.0.1:8080/browser?transport=h264
+ws://127.0.0.1:8080/browser/h264-stream
+http://127.0.0.1:8080/browser?transport=webrtc
+http://127.0.0.1:8080/browser/webrtc
+POST http://127.0.0.1:8080/browser/webrtc-offer
 ```
 
 ## Implementation Notes
@@ -51,8 +61,13 @@ http://127.0.0.1:8080/browser/stats
 - Non-booted unserved leases are reclaimed before status and lease decisions.
 - Streaming uses CoreSimulator/SimulatorKit private APIs through `native/src/simx_bridge.m`.
 - Streaming defaults to `--fps 60`; `--fps 120` is supported as a host-dependent target.
-- The stream path sends JPEG frames as binary WebSocket messages.
-- Browser input sends JSON text messages for touch, keyboard, resume, and Home.
+- The stable stream route is `WS /<slug>/stream`; it sends JPEG frames as binary WebSocket messages.
+- The stats route is `GET /<slug>/stats`; it reports target FPS, frame counts, drops, connected clients, and latency.
+- Browser HID/control messages are JSON text WebSocket messages for touch, keyboard, Home, resume, acknowledgements, and `claimControl`.
+- Streams default to `--control-mode read-only`, where browser clients can view frames but cannot send HID input.
+- Writable browser modes are `--control-mode single-controller`, `--control-mode claim`, and `--control-mode shared`.
+- H.264 is experimental: use `--transport h264`, `GET /<slug>?transport=h264`, and `WS /<slug>/h264-stream`.
+- WebRTC is a prototype surface: use `--transport webrtc`, `GET /<slug>?transport=webrtc`, `GET /<slug>/webrtc`, and `POST /<slug>/webrtc-offer`; signaling validation exists, but media delivery is incomplete.
 - `simx install --slug ... --app ...` installs a `.app` bundle on the active lease, infers `CFBundleIdentifier` from `Info.plist`, and launches it by default.
 - `simx run --slug ...` validates the current folder has one `.xcodeproj`, builds it quietly for the active lease, writes the build log under `.simx/logs/`, installs the built `.app`, infers `CFBundleIdentifier` from `Info.plist`, writes `.simx/run.json`, and launches it by default.
 - Do not reintroduce `simctl io screenshot` polling for streaming.
