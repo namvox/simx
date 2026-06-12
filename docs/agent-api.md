@@ -248,6 +248,26 @@ Use `--no-launch` to build and install without launching.
 
 `simx run` does not stream build output by default. Agents should inspect the returned `log` path only when they need build details, especially after a failed command.
 
+## SwiftUI Preview Hot Reload
+
+Agents should lease first, optionally serve the same lease for browser viewing,
+then run `simx preview` from a Swift package or pass an explicit manifest:
+
+```sh
+simx lease --slug agent-a --ttl 10m --serve --port 8080
+simx preview --slug agent-a --package Package.swift --package-target App
+```
+
+`simx preview` requires an active lease. It generates a temporary host project,
+builds and installs that host on the leased simulator, and watches Swift source
+changes by default. On change, it rebuilds a preview dylib and injects it into
+the running host app without relaunching the app. Use `--preview-filter` to
+select preview names and `--once --json` to build, launch, print session
+metadata, and exit without watching.
+
+This workflow is experimental and supports Swift Package library targets. It
+does not modify the user's package, `.xcodeproj`, schemes, or build settings.
+
 ## Doctor
 
 ```sh

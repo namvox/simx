@@ -60,7 +60,8 @@ See [docs/compatibility.md](docs/compatibility.md) for compatibility details.
 
 `simx` uses semantic versioning. The stable surface includes the pool, lease,
 serve, release, clean, doctor, run, install, update, and control commands, plus
-JSON output for agent-facing commands. See
+JSON output for agent-facing commands. `simx preview` is an experimental
+SwiftUI-preview hot-reload workflow. See
 [docs/api-stability.md](docs/api-stability.md) for the stable CLI, JSON, lease,
 streaming, and HID contracts.
 
@@ -184,6 +185,33 @@ simx install --slug feature-preview --app path/to/App.app --bundle-id com.exampl
 
 `simx install` infers `CFBundleIdentifier` from `Info.plist` when `--bundle-id`
 is omitted and launches by default.
+
+## SwiftUI Preview Hot Reload
+
+`simx preview` renders Swift Package-backed SwiftUI previews in an active leased
+simulator and watches Swift source changes by default:
+
+```sh
+simx lease --slug feature-preview --ttl 15m --serve --port 8080
+simx preview --slug feature-preview --package Package.swift --package-target App
+```
+
+The command generates a disposable host project under the system temporary
+directory, builds and installs that host on the leased simulator, and discovers
+`PreviewProvider` and `#Preview` declarations from the selected package target.
+On each source edit, it rebuilds a preview dylib, copies it into the running
+host app's data container, and notifies the host without relaunching the app.
+
+Useful options:
+
+```sh
+simx preview --slug feature-preview --package Package.swift --package-target App --preview-filter StatusRow
+simx preview --slug feature-preview --package Package.swift --package-target App --once --json
+```
+
+Preview hot reload is experimental. It supports importable Swift Package library
+targets and does not edit the package manifest, Xcode project, schemes, or build
+settings.
 
 ## Experimental Streaming
 

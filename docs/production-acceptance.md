@@ -90,6 +90,7 @@ the contract was unchanged.
 | Status JSON | `simx status --json` | JSON reports pool and per-device lease/serve state. | Save stdout JSON. |
 | Install JSON | `simx install --slug acceptance-api --app path/to/App.app --json` | Installs and launches the app, inferring `CFBundleIdentifier` when omitted. | Save stdout JSON and app bundle path. |
 | Run JSON | `simx run --slug acceptance-api --json` | Builds quietly, writes a build log under `.simx/logs/`, installs, writes `.simx/run.json`, and launches by default. | Save stdout JSON, `.simx/run.json`, and build log path. |
+| Preview JSON | `simx preview --slug acceptance-api --package Package.swift --package-target App --once --json` | Builds and launches the generated preview host for a Swift Package target and reports host/session metadata. | Save stdout JSON and preview build log paths. |
 | Update check | `simx update --check --json` | Reports current/latest version and whether an update is available. | Save stdout JSON. |
 | JSON errors | `simx --json-errors <failing-command>` | Runtime and argument errors use `{ ok, code, message }` and documented exit codes. | Save stdout/stderr and exit code. |
 

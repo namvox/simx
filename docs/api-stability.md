@@ -33,6 +33,26 @@ simx control
 Human-readable text output may change. Agents should use JSON output where
 available.
 
+## Experimental Commands
+
+`simx preview` is an experimental SwiftUI-preview hot-reload command:
+
+```sh
+simx preview --slug browser --package Package.swift --package-target App
+simx preview --slug browser --package Package.swift --package-target App --preview-filter StatusRow
+simx preview --slug browser --package Package.swift --package-target App --once --json
+```
+
+It requires an active lease, generates a disposable host project outside the
+package, installs that host on the leased simulator, and watches Swift Package
+source changes by default. Hot reload rebuilds a preview dylib, copies it into
+the running host app's data container, and notifies the host process without
+relaunching it.
+
+This command is not a stable contract in `v0.2.0`. Supported package shapes,
+generated host internals, JSON fields, watch behavior, and reload diagnostics
+may change in minor releases while the workflow is validated.
+
 ## Stable Agent JSON
 
 The following machine-readable outputs are stable in `v0.2.0`:

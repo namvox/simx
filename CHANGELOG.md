@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add experimental `simx preview` for Swift Package-backed SwiftUI previews with
+  host-app hot reload on an active leased simulator.
+
 ## v0.2.0 - 2026-06-12
 
 - Add `simx control` for native agent snapshots and HID commands,
