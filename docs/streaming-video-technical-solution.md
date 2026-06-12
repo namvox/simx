@@ -126,7 +126,8 @@ A staged implementation can be:
 3. Add a local encoded-frame transport for development validation. An
    experimental `/<slug>/h264-stream` WebSocket route and `?transport=h264`
    WebCodecs viewer mode are in place.
-4. Add WebRTC signaling and media delivery.
+4. Add WebRTC signaling and media delivery. A prototype signaling surface is in
+   place; media delivery is still incomplete.
 5. Keep the existing WebSocket HID channel, or move control messages onto a
    WebRTC data channel after the video path is stable.
 
@@ -165,6 +166,47 @@ streaming.
 Until WAN-shaped benchmark data is strong enough to promote the transport, the
 H.264 route shape, message envelope, tuning defaults, and discovery details are
 active-development surfaces rather than stable API guarantees.
+
+### WebRTC Prototype Surface
+
+The experimental WebRTC prototype is discoverable through:
+
+```text
+GET /<slug>?transport=webrtc
+GET /<slug>/webrtc
+POST /<slug>/webrtc-offer
+```
+
+`GET /<slug>?transport=webrtc` loads a viewer branch that creates a browser
+`RTCPeerConnection`, adds a `recvonly` video transceiver, creates an SDP offer,
+and posts it to `POST /<slug>/webrtc-offer`. The server validates that the
+payload is an offer, that the SDP includes a video m-line, and that HID remains
+on the existing WebSocket path with `hid: "websocket"`.
+
+The current prototype intentionally returns `501 Not Implemented` for valid
+offers. That response is part of the prototype contract: it proves the signaling
+shape and records the media work that must be finished before WebRTC can carry
+simulator video.
+
+The intended media mapping is:
+
+```text
+EncodedFrameSource::start_h264
+-> VideoToolbox H.264 access units plus AVC decoder configuration
+-> WebRTC H.264 RTP sender
+-> browser <video> track
+```
+
+The RTP sender should negotiate H.264 in SDP, use RFC 6184
+`packetization-mode=1`, map each access unit to a 90 kHz RTP timestamp derived
+from `pts_ms`, fragment large NAL units with FU-A, and make SPS/PPS available
+for decoder recovery around IDR frames. RTCP PLI/FIR feedback should call the
+existing keyframe request path. Transport feedback, NACK, bitrate adaptation,
+and stale-frame dropping should replace the current WebSocket-specific delivery
+heuristics before the route can be considered production-ready.
+
+HID/control stays on `WS /<slug>/stream` for this stage so media transport risk
+does not change touch, keyboard, Home, resume, or control-claim semantics.
 
 ### Producer And Fanout
 

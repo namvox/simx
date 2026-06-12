@@ -94,6 +94,7 @@ pub enum StreamTransport {
     #[default]
     Jpeg,
     H264,
+    Webrtc,
 }
 
 impl StreamTransport {
@@ -101,6 +102,7 @@ impl StreamTransport {
         match self {
             Self::Jpeg => "jpeg",
             Self::H264 => "h264",
+            Self::Webrtc => "webrtc",
         }
     }
 }
@@ -110,6 +112,40 @@ struct Health<'a> {
     status: &'a str,
     slug: &'a str,
     udid: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct WebrtcPrototypeInfo<'a> {
+    status: &'a str,
+    slug: &'a str,
+    transport: &'a str,
+    viewer: String,
+    signaling: String,
+    hid: WebrtcHidInfo,
+    media: WebrtcMediaInfo<'a>,
+    incomplete: Vec<&'a str>,
+    api_stability: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct WebrtcHidInfo {
+    mode: &'static str,
+    websocket: String,
+}
+
+#[derive(Debug, Serialize)]
+struct WebrtcMediaInfo<'a> {
+    codec: &'a str,
+    source: &'a str,
+    rtp_packetization: &'a str,
+    clock_rate_hz: u32,
+}
+
+#[derive(Debug)]
+struct WebrtcOfferSummary {
+    sdp_bytes: usize,
+    has_video_mline: bool,
+    advertises_h264: bool,
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -248,6 +284,9 @@ fn handle_connection(
         stream_h264_frames(stream, config, encoded_source)?;
         return Ok(());
     }
+    if request_method(&request) == Some("POST") && path == webrtc_offer_path(&config.slug) {
+        return handle_webrtc_offer(&mut stream, &config, &request);
+    }
 
     match path {
         "/" => {
@@ -277,6 +316,10 @@ fn handle_connection(
             let body = serde_json::to_vec(&snapshot_stats(&config))?;
             write_http_response(&mut stream, "200 OK", "application/json", &body)
         }
+        path if path == webrtc_descriptor_path(&config.slug) => {
+            let body = serde_json::to_vec(&webrtc_prototype_info(&config))?;
+            write_http_response(&mut stream, "200 OK", "application/json", &body)
+        }
         _ => write_http_response(
             &mut stream,
             "404 Not Found",
@@ -292,6 +335,122 @@ fn stream_path(slug: &str) -> String {
 
 fn h264_stream_path(slug: &str) -> String {
     format!("/{slug}/h264-stream")
+}
+
+fn webrtc_descriptor_path(slug: &str) -> String {
+    format!("/{slug}/webrtc")
+}
+
+fn webrtc_offer_path(slug: &str) -> String {
+    format!("/{slug}/webrtc-offer")
+}
+
+fn webrtc_prototype_info(config: &ServeConfig) -> WebrtcPrototypeInfo<'_> {
+    WebrtcPrototypeInfo {
+        status: "experimental",
+        slug: &config.slug,
+        transport: "webrtc",
+        viewer: format!(
+            "http://{}:{}/{}?transport=webrtc",
+            config.host, config.port, config.slug
+        ),
+        signaling: webrtc_offer_path(&config.slug),
+        hid: WebrtcHidInfo {
+            mode: "websocket",
+            websocket: stream_path(&config.slug),
+        },
+        media: WebrtcMediaInfo {
+            codec: "H.264/AVC",
+            source: "VideoToolbox encoded frames from the existing experimental H.264 producer",
+            rtp_packetization: "RFC 6184 packetization-mode=1, negotiated by SDP",
+            clock_rate_hz: 90_000,
+        },
+        incomplete: vec![
+            "SDP answer generation",
+            "ICE/DTLS/SRTP session ownership",
+            "H.264 RTP packetization and RTCP feedback",
+            "Congestion control and production readiness checks",
+        ],
+        api_stability: "Experimental; see docs/api-stability.md",
+    }
+}
+
+fn handle_webrtc_offer(
+    stream: &mut TcpStream,
+    config: &ServeConfig,
+    request: &str,
+) -> anyhow::Result<()> {
+    match validate_webrtc_offer(http_body(request)) {
+        Ok(summary) => {
+            let body = serde_json::json!({
+                "type": "webrtcPrototype",
+                "status": "media-not-implemented",
+                "slug": config.slug,
+                "transport": "webrtc",
+                "offer": {
+                    "sdpBytes": summary.sdp_bytes,
+                    "hasVideoMLine": summary.has_video_mline,
+                    "advertisesH264": summary.advertises_h264
+                },
+                "hid": {
+                    "mode": "websocket",
+                    "websocket": stream_path(&config.slug)
+                },
+                "media": {
+                    "codec": "H.264/AVC",
+                    "source": "EncodedFrameSource::start_h264",
+                    "rtpPacketization": "RFC 6184 packetization-mode=1",
+                    "clockRateHz": 90000
+                },
+                "next": [
+                    "Create a WebRTC peer connection on the Rust side",
+                    "Packetize existing VideoToolbox H.264 access units into RTP",
+                    "Map RTCP PLI/FIR feedback to requestKeyframe",
+                    "Keep HID/control on the existing WebSocket path while media transport is evaluated"
+                ],
+                "error": "WebRTC signaling is validated, but SDP answer generation and media delivery are not implemented in this prototype."
+            });
+            let body = serde_json::to_vec(&body)?;
+            write_http_response(stream, "501 Not Implemented", "application/json", &body)
+        }
+        Err(message) => {
+            let body = serde_json::to_vec(&serde_json::json!({
+                "type": "webrtcPrototypeError",
+                "status": "invalid-offer",
+                "error": message
+            }))?;
+            write_http_response(stream, "400 Bad Request", "application/json", &body)
+        }
+    }
+}
+
+fn validate_webrtc_offer(body: &str) -> Result<WebrtcOfferSummary, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(body).map_err(|error| format!("invalid JSON offer: {error}"))?;
+    if value.get("type").and_then(|value| value.as_str()) != Some("offer") {
+        return Err("offer type must be \"offer\"".to_string());
+    }
+    if let Some(hid) = value.get("hid").and_then(|value| value.as_str()) {
+        if hid != "websocket" {
+            return Err("WebRTC prototype keeps HID on the existing WebSocket path".to_string());
+        }
+    }
+    let sdp = value
+        .get("sdp")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "offer sdp must be a string".to_string())?;
+    if sdp.trim().is_empty() {
+        return Err("offer sdp must not be empty".to_string());
+    }
+    let has_video_mline = sdp.lines().any(|line| line.starts_with("m=video "));
+    if !has_video_mline {
+        return Err("offer sdp must include a video m-line".to_string());
+    }
+    Ok(WebrtcOfferSummary {
+        sdp_bytes: sdp.len(),
+        has_video_mline,
+        advertises_h264: sdp.to_ascii_uppercase().contains("H264"),
+    })
 }
 
 fn h264_frame_message(frame: &EncodedFrame) -> Vec<u8> {
@@ -987,14 +1146,31 @@ fn read_http_request(stream: &mut TcpStream) -> anyhow::Result<String> {
             break;
         }
         buffer.extend_from_slice(&chunk[..read]);
-        if buffer.windows(4).any(|window| window == b"\r\n\r\n") {
-            break;
-        }
         if buffer.len() > 16 * 1024 {
             bail!("request header too large");
         }
+        if let Some(header_end) = find_header_end(&buffer) {
+            let headers = String::from_utf8_lossy(&buffer[..header_end]).into_owned();
+            let content_length = content_length(&headers).unwrap_or(0);
+            if content_length > 64 * 1024 {
+                bail!("request body too large");
+            }
+            let expected = header_end + 4 + content_length;
+            while buffer.len() < expected {
+                let read = stream.read(&mut chunk)?;
+                if read == 0 {
+                    break;
+                }
+                buffer.extend_from_slice(&chunk[..read]);
+            }
+            break;
+        }
     }
     Ok(String::from_utf8_lossy(&buffer).into_owned())
+}
+
+fn find_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
 #[derive(Default)]
@@ -1622,6 +1798,21 @@ fn request_path(request: &str) -> Option<&str> {
     parts.next()
 }
 
+fn request_method(request: &str) -> Option<&str> {
+    request.lines().next()?.split_whitespace().next()
+}
+
+fn http_body(request: &str) -> &str {
+    request
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body)
+        .unwrap_or("")
+}
+
+fn content_length(headers: &str) -> Option<usize> {
+    header_value(headers, "content-length")?.parse().ok()
+}
+
 fn is_ws_upgrade(request: &str) -> bool {
     header_value(request, "upgrade")
         .map(|value| value.eq_ignore_ascii_case("websocket"))
@@ -1887,9 +2078,10 @@ mod tests {
         acquire_controller, claim_controller, h264_codec_string, h264_stream_path, input_ack,
         is_claim_control_message, is_keyframe_request_message, is_resume_message,
         is_unacknowledged_touch_move, lease_is_active, parse_next_ws_event, slug_path,
-        slug_path_slash, stats_path, stream_path, websocket_accept, EncodedFrame,
-        EncodedFrameContext, EncodedFrameSource, LatestEncodedFrame, NativeFrameSource,
-        ServeConfig, StreamControlMode, StreamStats, StreamTransport, WsEvent,
+        slug_path_slash, stats_path, stream_path, validate_webrtc_offer, webrtc_descriptor_path,
+        webrtc_offer_path, websocket_accept, EncodedFrame, EncodedFrameContext, EncodedFrameSource,
+        LatestEncodedFrame, NativeFrameSource, ServeConfig, StreamControlMode, StreamStats,
+        StreamTransport, WsEvent,
     };
     use tempfile::TempDir;
 
@@ -1905,6 +2097,8 @@ mod tests {
     fn builds_slug_scoped_stream_path() {
         assert_eq!(stream_path("slug-a"), "/slug-a/stream");
         assert_eq!(h264_stream_path("slug-a"), "/slug-a/h264-stream");
+        assert_eq!(webrtc_descriptor_path("slug-a"), "/slug-a/webrtc");
+        assert_eq!(webrtc_offer_path("slug-a"), "/slug-a/webrtc-offer");
         assert_eq!(stats_path("slug-a"), "/slug-a/stats");
     }
 
@@ -1957,6 +2151,49 @@ mod tests {
         ));
         assert!(!is_claim_control_message(r#"{"type":"resume"}"#));
         assert!(!is_claim_control_message("not-json"));
+    }
+
+    #[test]
+    fn validates_webrtc_video_offers_for_websocket_hid() {
+        let offer = validate_webrtc_offer(
+            r#"{
+                "type": "offer",
+                "sdp": "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 102\r\na=rtpmap:102 H264/90000\r\n",
+                "hid": "websocket"
+            }"#,
+        )
+        .unwrap();
+
+        assert!(offer.has_video_mline);
+        assert!(offer.advertises_h264);
+        assert!(offer.sdp_bytes > 0);
+    }
+
+    #[test]
+    fn rejects_webrtc_offers_that_move_hid_to_data_channel() {
+        let error = validate_webrtc_offer(
+            r#"{
+                "type": "offer",
+                "sdp": "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 102\r\n",
+                "hid": "data-channel"
+            }"#,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("WebSocket"));
+    }
+
+    #[test]
+    fn rejects_webrtc_offers_without_video() {
+        let error = validate_webrtc_offer(
+            r#"{
+                "type": "offer",
+                "sdp": "v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n"
+            }"#,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("video"));
     }
 
     #[test]

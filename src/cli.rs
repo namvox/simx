@@ -40,9 +40,11 @@ Open:
   http://127.0.0.1:8080/browser
   ws://127.0.0.1:8080/browser/stream       (stable JPEG)
   ws://127.0.0.1:8080/browser/h264-stream  (experimental H.264/WebCodecs)
+  http://127.0.0.1:8080/browser?transport=webrtc
+  http://127.0.0.1:8080/browser/webrtc
   http://127.0.0.1:8080/browser/stats
 
-JPEG is the stable fallback. H.264/WebCodecs is experimental until WAN benchmark evidence is strong."
+JPEG is the stable fallback. H.264/WebCodecs and WebRTC are experimental until WAN benchmark evidence is strong."
 )]
 struct Cli {
     /// Print CLI errors as stable JSON.
@@ -83,6 +85,7 @@ enum Command {
   simx lease --slug browser --ttl 10m --json
   simx lease --slug browser --serve --port 8080 --idle-timeout 5m
   simx lease --slug browser --serve --port 8080 --fps 120 --transport h264
+  simx lease --slug browser --serve --port 8080 --transport webrtc
   simx lease --slug browser --new --json
 
 Notes:
@@ -140,15 +143,18 @@ Notes:
     #[command(after_help = "Examples:
   simx serve --slug browser --port 8080
   simx serve --slug browser --transport h264 --fps 120
+  simx serve --slug browser --transport webrtc
   simx serve --slug browser --control-mode single-controller
 
 Viewer:
   http://127.0.0.1:<port>/<slug>
   ws://127.0.0.1:<port>/<slug>/stream       (stable JPEG)
   ws://127.0.0.1:<port>/<slug>/h264-stream  (experimental H.264/WebCodecs)
+  http://127.0.0.1:<port>/<slug>?transport=webrtc
+  http://127.0.0.1:<port>/<slug>/webrtc     (WebRTC prototype descriptor)
   http://127.0.0.1:<port>/<slug>/stats
 
-JPEG is the stable fallback. H.264/WebCodecs is experimental until WAN benchmark evidence is strong.")]
+JPEG is the stable fallback. H.264/WebCodecs and WebRTC are experimental until WAN benchmark evidence is strong.")]
     Serve {
         /// Active lease owner name to serve.
         #[arg(long)]
@@ -305,6 +311,8 @@ struct ServeOutput {
     stream: String,
     h264_url: String,
     h264_stream: String,
+    webrtc_url: String,
+    webrtc_signaling: String,
     stats: String,
     control_mode: String,
 }
@@ -323,6 +331,7 @@ struct LeasePrintOptions<'a> {
 enum CliTransport {
     Jpeg,
     H264,
+    Webrtc,
 }
 
 impl From<CliTransport> for StreamTransport {
@@ -330,6 +339,7 @@ impl From<CliTransport> for StreamTransport {
         match value {
             CliTransport::Jpeg => Self::Jpeg,
             CliTransport::H264 => Self::H264,
+            CliTransport::Webrtc => Self::Webrtc,
         }
     }
 }
@@ -1800,6 +1810,7 @@ fn print_lease(
     let transport_arg = match transport {
         CliTransport::Jpeg => String::new(),
         CliTransport::H264 => " --transport h264".to_string(),
+        CliTransport::Webrtc => " --transport webrtc".to_string(),
     };
     let control_mode_arg = match control_mode {
         CliControlMode::ReadOnly => String::new(),
@@ -1822,10 +1833,15 @@ fn print_lease(
                 url: match transport {
                     CliTransport::Jpeg => format!("http://{host}:{port}/{slug}"),
                     CliTransport::H264 => format!("http://{host}:{port}/{slug}?transport=h264"),
+                    CliTransport::Webrtc => {
+                        format!("http://{host}:{port}/{slug}?transport=webrtc")
+                    }
                 },
                 stream: format!("ws://{host}:{port}/{slug}/stream"),
                 h264_url: format!("http://{host}:{port}/{slug}?transport=h264"),
                 h264_stream: format!("ws://{host}:{port}/{slug}/h264-stream"),
+                webrtc_url: format!("http://{host}:{port}/{slug}?transport=webrtc"),
+                webrtc_signaling: format!("http://{host}:{port}/{slug}/webrtc-offer"),
                 stats: format!("http://{host}:{port}/{slug}/stats"),
                 control_mode: StreamControlMode::from(control_mode).as_str().to_string(),
             },
@@ -1838,8 +1854,13 @@ fn print_lease(
             println!("lease expires at {}", format_unix_timestamp(expires_at));
         }
         println!("serve with: simx serve --slug {slug} --host {host} --port {port}{transport_arg}{control_mode_arg}");
-        if transport == CliTransport::H264 {
-            println!("viewer: http://{host}:{port}/{slug}?transport=h264");
+        match transport {
+            CliTransport::Jpeg => {}
+            CliTransport::H264 => println!("viewer: http://{host}:{port}/{slug}?transport=h264"),
+            CliTransport::Webrtc => {
+                println!("viewer: http://{host}:{port}/{slug}?transport=webrtc");
+                println!("signaling: http://{host}:{port}/{slug}/webrtc-offer");
+            }
         }
     }
     Ok(())
@@ -2027,12 +2048,15 @@ mod tests {
         let root_help = Cli::command().render_long_help().to_string();
         assert!(root_help.contains("stream       (stable JPEG)"));
         assert!(root_help.contains("h264-stream  (experimental H.264/WebCodecs)"));
+        assert!(root_help.contains("browser?transport=webrtc"));
+        assert!(root_help.contains("browser/webrtc"));
         assert!(root_help.contains("JPEG is the stable fallback"));
-        assert!(root_help.contains("H.264/WebCodecs is experimental"));
+        assert!(root_help.contains("H.264/WebCodecs and WebRTC are experimental"));
 
         for subcommand in ["lease", "serve"] {
             let help = help_for_subcommand(subcommand);
             assert!(help.contains("--transport h264"));
+            assert!(help.contains("--transport webrtc"));
             assert!(help.contains("jpeg is stable fallback, h264 is experimental"));
             assert!(help.contains("JPEG is the stable fallback"));
         }

@@ -11,7 +11,7 @@
     .phone { width: min(390px, 90vw); padding: 10px; border-radius: 44px; background: linear-gradient(135deg, #c97832, #f2b36d 45%, #7d421f); box-shadow: 0 28px 80px #0009; }
     .screen { position: relative; overflow: hidden; border-radius: 34px; background: #050608; aspect-ratio: 1170 / 2532; outline: none; touch-action: none; }
     .screen:focus { box-shadow: 0 0 0 3px #f2b36d; }
-    img, canvas { display: block; width: 100%; height: 100%; object-fit: contain; -webkit-user-drag: none; user-select: none; }
+    img, canvas, video { display: block; width: 100%; height: 100%; object-fit: contain; -webkit-user-drag: none; user-select: none; }
     .permission { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 2; max-width: calc(100% - 32px); padding: 7px 11px; border-radius: 999px; background: rgba(17, 19, 24, 0.86); color: #f5f7fb; border: 1px solid rgba(255, 255, 255, 0.18); font-size: 12px; font-weight: 700; line-height: 1.2; text-align: center; white-space: nowrap; pointer-events: none; backdrop-filter: blur(12px); }
     .permission[data-mode="write"] { background: rgba(23, 92, 58, 0.88); border-color: rgba(136, 226, 176, 0.36); }
     .permission[data-mode="read"] { background: rgba(105, 65, 21, 0.9); border-color: rgba(242, 179, 109, 0.42); }
@@ -28,6 +28,7 @@
       <div id="screen" class="screen" tabindex="0">
         <img id="frame" alt="Simulator stream">
         <canvas id="video" hidden></canvas>
+        <video id="rtc-video" autoplay playsinline muted hidden></video>
         <div id="permission" class="permission" data-mode="read">Connecting...</div>
       </div>
     </div>
@@ -42,6 +43,7 @@
     const statusEl = document.getElementById("status");
     const frameEl = document.getElementById("frame");
     const videoEl = document.getElementById("video");
+    const rtcVideoEl = document.getElementById("rtc-video");
     const screenEl = document.getElementById("screen");
     const claimEl = document.getElementById("claim");
     const resumeEl = document.getElementById("resume");
@@ -49,7 +51,8 @@
     const permissionEl = document.getElementById("permission");
     const params = new URLSearchParams(location.search);
     const defaultTransport = "__SIMX_TRANSPORT__";
-    const transport = params.get("transport") === "h264" || (!params.has("transport") && defaultTransport === "h264") ? "h264" : "jpeg";
+    const requestedTransport = params.get("transport") || defaultTransport;
+    const transport = requestedTransport === "webrtc" ? "webrtc" : requestedTransport === "h264" ? "h264" : "jpeg";
     const videoContext = videoEl.getContext("2d", { alpha: false });
     let socket;
     let objectUrl;
@@ -323,16 +326,38 @@
     }
     function connect() {
       const slug = "__SIMX_SLUG__";
-      const streamPath = transport === "h264" ? "h264-stream" : "stream";
+      if (transport === "webrtc") {
+        connectStreamSocket(slug, true);
+        connectWebrtcPrototype(slug);
+        return;
+      }
+      connectStreamSocket(slug, false);
+    }
+    function connectStreamSocket(slug, controlOnly) {
+      const streamPath = controlOnly ? "stream" : transport === "h264" ? "h264-stream" : "stream";
       socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/${encodeURIComponent(slug)}/${streamPath}`);
-      socket.binaryType = transport === "h264" ? "arraybuffer" : "blob";
+      socket.binaryType = !controlOnly && transport === "h264" ? "arraybuffer" : "blob";
       socket.onopen = () => {
-        setStatus("Live");
+        if (!controlOnly) setStatus("Live");
         send({ type: "resume" });
         requestKeyframe("connect");
       };
-      socket.onclose = () => { setStatus("Disconnected; reconnecting..."); setTimeout(connect, 800); };
-      socket.onerror = () => setStatus("Stream error");
+      socket.onclose = () => {
+        if (controlOnly) {
+          setPermission("HID WebSocket reconnecting...", false);
+          setTimeout(() => connectStreamSocket(slug, true), 800);
+        } else {
+          setStatus("Disconnected; reconnecting...");
+          setTimeout(connect, 800);
+        }
+      };
+      socket.onerror = () => {
+        if (controlOnly) {
+          setPermission("HID WebSocket error", false);
+        } else {
+          setStatus("Stream error");
+        }
+      };
       socket.onmessage = (event) => {
         if (typeof event.data === "string") {
           try {
@@ -357,6 +382,7 @@
           } catch (_) {}
           return;
         }
+        if (controlOnly) return;
         if (transport === "h264") {
           decodeVideoChunk(event.data);
           return;
@@ -367,10 +393,61 @@
         if (!paused) setStatus("Live");
       };
     }
+    async function connectWebrtcPrototype(slug) {
+      setPermission("HID uses WebSocket", false);
+      claimEl.hidden = true;
+      resumeEl.hidden = true;
+      frameEl.hidden = true;
+      videoEl.hidden = true;
+      rtcVideoEl.hidden = false;
+      if (!("RTCPeerConnection" in window)) {
+        setStatus("WebRTC unavailable");
+        return;
+      }
+      setStatus("Creating WebRTC offer...");
+      const prototypeState = { descriptor: null, response: null, error: null };
+      window.simxWebrtcPrototype = prototypeState;
+      try {
+        const descriptorResponse = await fetch(`/${encodeURIComponent(slug)}/webrtc`);
+        prototypeState.descriptor = await descriptorResponse.json();
+        const peer = new RTCPeerConnection();
+        peer.addTransceiver("video", { direction: "recvonly" });
+        peer.ontrack = (event) => {
+          rtcVideoEl.srcObject = event.streams[0];
+          setStatus("Live WebRTC");
+        };
+        const offer = await peer.createOffer();
+        await peer.setLocalDescription(offer);
+        const capabilities = window.RTCRtpReceiver?.getCapabilities?.("video") || null;
+        const response = await fetch(`/${encodeURIComponent(slug)}/webrtc-offer`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            type: offer.type,
+            sdp: offer.sdp,
+            hid: "websocket",
+            capabilities
+          })
+        });
+        prototypeState.response = await response.json();
+        if (response.ok && prototypeState.response.answer?.sdp) {
+          await peer.setRemoteDescription(prototypeState.response.answer);
+          setStatus("Live WebRTC");
+        } else {
+          setStatus("WebRTC signaling ready; media sender pending");
+        }
+      } catch (error) {
+        prototypeState.error = String(error);
+        setStatus("WebRTC prototype error");
+        console.error(error);
+      }
+    }
     if (transport === "h264") {
       frameEl.hidden = true;
       videoEl.hidden = false;
       if (!("VideoDecoder" in window)) setStatus("WebCodecs unavailable");
+    } else if (transport === "webrtc" && !("RTCPeerConnection" in window)) {
+      setStatus("WebRTC unavailable");
     }
     screenEl.addEventListener("pointerdown", (event) => {
       event.preventDefault();

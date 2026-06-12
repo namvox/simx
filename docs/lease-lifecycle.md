@@ -129,7 +129,12 @@ Lease and renew return the same shape with `--json`:
     "command": "simx serve --slug checkout-tests --host 127.0.0.1 --port 8080",
     "url": "http://127.0.0.1:8080/checkout-tests",
     "stream": "ws://127.0.0.1:8080/checkout-tests/stream",
-    "stats": "http://127.0.0.1:8080/checkout-tests/stats"
+    "h264_url": "http://127.0.0.1:8080/checkout-tests?transport=h264",
+    "h264_stream": "ws://127.0.0.1:8080/checkout-tests/h264-stream",
+    "webrtc_url": "http://127.0.0.1:8080/checkout-tests?transport=webrtc",
+    "webrtc_signaling": "http://127.0.0.1:8080/checkout-tests/webrtc-offer",
+    "stats": "http://127.0.0.1:8080/checkout-tests/stats",
+    "control_mode": "read-only"
   }
 }
 ```

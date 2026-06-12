@@ -31,6 +31,10 @@ Lease and renew return:
 - `serve.command`
 - `serve.url`
 - `serve.stream`
+- `serve.h264_url`
+- `serve.h264_stream`
+- `serve.webrtc_url`
+- `serve.webrtc_signaling`
 - `serve.stats`
 - `serve.control_mode`
 
