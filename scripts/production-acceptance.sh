@@ -85,7 +85,10 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
-mkdir -p "$EVIDENCE_DIR"
+if ! mkdir -p "$EVIDENCE_DIR"; then
+  echo "failed to create evidence directory: $EVIDENCE_DIR" >&2
+  exit 1
+fi
 SUMMARY_FILE="$EVIDENCE_DIR/summary.md"
 COMMANDS_FILE="$EVIDENCE_DIR/commands.log"
 FAILURES=0
@@ -98,8 +101,14 @@ write_header() {
     echo "- Evidence directory: $EVIDENCE_DIR"
     echo
     echo "## Results"
-  } > "$SUMMARY_FILE"
-  : > "$COMMANDS_FILE"
+  } > "$SUMMARY_FILE" || {
+    echo "failed to write summary file: $SUMMARY_FILE" >&2
+    exit 1
+  }
+  : > "$COMMANDS_FILE" || {
+    echo "failed to write commands log: $COMMANDS_FILE" >&2
+    exit 1
+  }
 }
 
 shell_quote() {
@@ -109,7 +118,7 @@ shell_quote() {
 record_command() {
   local name="$1"
   shift
-  {
+  if ! {
     echo "[$name]"
     printf "\$"
     for arg in "$@"; do
@@ -118,7 +127,10 @@ record_command() {
     done
     echo
     echo
-  } >> "$COMMANDS_FILE"
+  } >> "$COMMANDS_FILE"; then
+    echo "failed to write command log: $COMMANDS_FILE" >&2
+    exit 1
+  fi
 }
 
 run_step() {
@@ -129,6 +141,14 @@ run_step() {
 
   echo "==> $name"
   record_command "$name" "$@"
+  if ! : > "$stdout_log"; then
+    echo "failed to write stdout log: $stdout_log" >&2
+    exit 1
+  fi
+  if ! : > "$stderr_log"; then
+    echo "failed to write stderr log: $stderr_log" >&2
+    exit 1
+  fi
 
   if "$@" > >(tee "$stdout_log") 2> >(tee "$stderr_log" >&2); then
     echo "- [x] \`$name\` passed. Logs: \`$stdout_log\`, \`$stderr_log\`." >> "$SUMMARY_FILE"
