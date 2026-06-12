@@ -156,11 +156,16 @@ GET /<slug>/stats
 WS  /<slug>/stream
 ```
 
-Active-development H.264 route shape:
+Experimental H.264 route shape:
 
 ```text
 GET /<slug>?transport=h264
 WS  /<slug>/h264-stream
+```
+
+WebRTC prototype route shape:
+
+```text
 GET /<slug>?transport=webrtc
 GET /<slug>/webrtc
 POST /<slug>/webrtc-offer
