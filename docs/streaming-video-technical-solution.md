@@ -1,6 +1,6 @@
 # Streaming Video Technical Solution
 
-This document describes the proposed direction for improving simulator
+This document describes the current technical direction for improving simulator
 streaming so `simx` can target high-quality 60 fps browser playback over real
 networks.
 
@@ -29,8 +29,9 @@ The main issues are:
   frames behind stale frame data.
 - The browser repeatedly allocates Blob URLs and swaps an image element instead
   of using a native video playback pipeline.
-- The current implementation starts the native frame source per WebSocket
-  client, so multiple viewers can multiply capture and encode work.
+- The stable JPEG viewer still uses a browser image update path rather than a
+  native video pipeline, even though the serve process now owns shared producer
+  state instead of starting native capture separately for each viewer.
 
 The target experience is interactive simulator control with clear text,
 responsive input, and sustained 60 fps when host and network conditions allow.
@@ -96,7 +97,7 @@ Start with H.264 because it has the broadest browser hardware decode support.
 HEVC can be considered later for Apple-only or explicitly negotiated clients,
 but it should not be the default web compatibility path.
 
-The initial encoder should target:
+The H.264 encoder path targets:
 
 - 60 fps
 - real-time encoding mode
@@ -117,7 +118,7 @@ real-time media, network adaptation, jitter handling, and browser playback.
 Keep the existing JPEG-over-WebSocket path as the stable local/debug fallback
 while the new path matures.
 
-A staged implementation can be:
+A staged implementation is now partially in place:
 
 1. Refactor serve to use one shared frame producer per leased simulator. Done in
    the first implementation slice.
@@ -126,13 +127,14 @@ A staged implementation can be:
 3. Add a local encoded-frame transport for development validation. An
    experimental `/<slug>/h264-stream` WebSocket route and `?transport=h264`
    WebCodecs viewer mode are in place.
-4. Add WebRTC signaling and media delivery. A prototype signaling surface is in
-   place; media delivery is still incomplete.
+4. Add WebRTC signaling and media delivery. A prototype signaling surface and
+   `--transport webrtc` selector are in place; WebRTC media delivery is still
+   incomplete.
 5. Keep the existing WebSocket HID channel, or move control messages onto a
    WebRTC data channel after the video path is stable.
 
-If WebRTC is too large for the first implementation step, an intermediate
-WebCodecs transport may be useful:
+The intermediate WebCodecs transport remains useful for encoder validation while
+WebRTC media delivery is unfinished:
 
 ```text
 VideoToolbox H.264
@@ -210,12 +212,17 @@ does not change touch, keyboard, Home, resume, or control-claim semantics.
 
 ### Producer And Fanout
 
-The serve process should own one capture/encode producer for the active lease.
-Clients should subscribe to the latest encoded stream rather than starting their
-own native frame sources.
+The serve process shares producer state per transport for the active lease.
+Multiple JPEG clients subscribe through the shared JPEG frame source, and
+multiple H.264 clients subscribe through the shared encoded H.264 source.
+Because those are separate transport-specific source slots, a serve process with
+both `/<slug>/stream` and `/<slug>/h264-stream` clients can still initialize one
+native frame stream for JPEG and one native H.264 stream for the experimental
+encoded route.
 
-This reduces CPU, avoids duplicate native private API registrations, and makes
-stats easier to reason about.
+Per-transport fanout reduces duplicate capture work among clients using the same
+route, avoids per-client native private API registrations within that route, and
+makes stats easier to reason about.
 
 ### Backpressure
 
@@ -252,9 +259,8 @@ decoder error. The native VideoToolbox bridge fulfills the request with
 
 ### Compatibility
 
-The current JPEG stream should remain available during the transition.
-
-Suggested CLI direction:
+The JPEG stream remains the stable default during the transition. The serve CLI
+implements an explicit transport selector:
 
 ```sh
 simx serve --slug browser --port 8080 --transport jpeg
@@ -262,9 +268,12 @@ simx serve --slug browser --port 8080 --transport h264
 simx serve --slug browser --port 8080 --transport webrtc
 ```
 
-The exact CLI should be finalized when implementation begins. Any stable CLI,
-JSON, WebSocket, WebRTC, or HID contract changes must update the relevant docs
-and reference `docs/api-stability.md`.
+`--transport jpeg` is the stable compatibility path. `--transport h264` is an
+experimental VideoToolbox/WebCodecs path pending WAN benchmark evidence.
+`--transport webrtc` exposes the prototype WebRTC viewer/signaling surface, but
+does not yet deliver simulator video over WebRTC. Any stable CLI, JSON,
+WebSocket, WebRTC, or HID contract changes must update the relevant docs and
+reference `docs/api-stability.md`.
 
 ## Benchmarking
 
