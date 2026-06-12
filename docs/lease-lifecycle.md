@@ -110,8 +110,12 @@ simx lease --slug browser-preview --ttl 10m --serve --port 8080
 `simx serve` records its PID, host, and port in pool state. The serve loop checks
 lease state and stops when the lease is no longer active.
 
-Streaming is experimental and unauthenticated in the current version. Keep serve
-hosts local unless you have separate network isolation.
+Per [api-stability.md](api-stability.md), `simx serve`, the default JPEG
+viewer/stream route, the stats route, and the WebSocket HID/control message
+contract are stable. Streaming still uses private Apple Simulator APIs, is
+unauthenticated, and defaults to `127.0.0.1`; use separate network isolation
+before binding serve hosts to non-local interfaces. H.264 and WebRTC transport
+surfaces remain experimental/prototype-only.
 
 ## JSON Shapes
 
