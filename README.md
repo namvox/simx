@@ -6,9 +6,11 @@ simulator, renews the lease while it works, installs or runs an app, and release
 the simulator when finished. Human iOS developers can use the same commands for
 repeatable local workflows.
 
-Browser streaming is experimental. It uses private Apple CoreSimulator and
-SimulatorKit APIs, so behavior can break across macOS, Xcode, or iOS Simulator
-updates.
+Browser streaming's stable contract includes the `simx serve` CLI, the default
+JPEG-over-WebSocket stream, stats endpoint, WebSocket HID/control protocol, and
+control modes. The implementation still uses private Apple CoreSimulator and
+SimulatorKit APIs, so runtime compatibility can break across macOS, Xcode, or
+iOS Simulator updates, and the browser server is unauthenticated.
 
 ## Agent-First Quickstart
 
@@ -60,8 +62,10 @@ See [docs/compatibility.md](docs/compatibility.md) for compatibility details.
 
 `simx` uses semantic versioning. The stable surface includes the pool, lease,
 serve, release, clean, doctor, run, install, update, and control commands, plus
-JSON output for agent-facing commands. `simx preview` is an experimental
-SwiftUI-preview hot-reload workflow. See
+JSON output for agent-facing commands. Browser streaming's stable surface
+includes the serve CLI, default JPEG/WebSocket stream, stats endpoint,
+WebSocket HID/control protocol, and control modes. `simx preview` is an
+experimental SwiftUI-preview hot-reload workflow. See
 [docs/api-stability.md](docs/api-stability.md) for the stable CLI, JSON, lease,
 streaming, and HID contracts.
 
@@ -217,7 +221,7 @@ Preview hot reload is experimental. It supports importable Swift Package library
 targets and does not edit the package manifest, Xcode project, schemes, or build
 settings.
 
-## Experimental Streaming
+## Browser Streaming
 
 Streaming serves a browser viewer and WebSocket stream for an active lease:
 
@@ -235,46 +239,13 @@ ws://127.0.0.1:8080/browser-preview/stream
 http://127.0.0.1:8080/browser-preview/stats
 ```
 
-The default transport is JPEG-over-WebSocket and is the stable fallback for
-browser streaming. The hardware H.264/WebCodecs path is experimental and can be
-served directly with:
+### Stable Default Stream And Control
 
-```sh
-simx lease --slug browser-preview --ttl 10m --serve --port 8080 --transport h264
-```
-
-Open:
-
-```text
-http://127.0.0.1:8080/browser-preview?transport=h264
-ws://127.0.0.1:8080/browser-preview/h264-stream
-```
-
-Treat `--transport h264`, `?transport=h264`, and `/<slug>/h264-stream` as
-active-development surfaces until WAN-shaped benchmark evidence is strong. The
-route shape, WebSocket message envelope, tuning defaults, and H.264 discovery
-details may change before the transport is promoted to a stable contract.
-
-The experimental WebRTC prototype validates browser signaling without replacing
-the stable media or HID paths yet:
-
-```sh
-simx lease --slug browser-preview --ttl 10m --serve --port 8080 --transport webrtc
-```
-
-Open:
-
-```text
-http://127.0.0.1:8080/browser-preview?transport=webrtc
-http://127.0.0.1:8080/browser-preview/webrtc
-POST http://127.0.0.1:8080/browser-preview/webrtc-offer
-```
-
-The WebRTC viewer creates an SDP offer and posts it to the signaling endpoint.
-For now, valid offers receive a structured `501 Not Implemented` response
-because SDP answers, ICE/DTLS/SRTP ownership, H.264 RTP packetization, and RTCP
-feedback are not implemented. HID/control remains on the existing WebSocket
-stream contract while video transport is evaluated.
+The stable browser-streaming contract covers the `simx serve` CLI, the default
+JPEG-over-WebSocket binary stream at `/<slug>/stream`, `/<slug>/stats`, the
+WebSocket HID/control protocol, and `--control-mode` behavior. The default
+stream remains compatibility-sensitive because it is backed by private Simulator
+APIs, and it is unauthenticated like the rest of the local browser server.
 
 The public default is `--fps 60`. `--fps` is configurable and sets the target
 frame pacing used by the server; `--fps 120` remains supported as a
@@ -322,17 +293,61 @@ simulator. It does not use the served WebSocket stream, and it does not send
 `simx control tree` is reserved for a future accessibility snapshot provider and
 currently reports that no provider is implemented.
 
+You can also serve an existing active lease:
+
+```sh
+simx serve --slug browser-preview --port 8080
+```
+
+### Experimental H.264
+
+The hardware H.264/WebCodecs path is experimental and can be served directly
+with:
+
+```sh
+simx lease --slug browser-preview --ttl 10m --serve --port 8080 --transport h264
+```
+
+Open:
+
+```text
+http://127.0.0.1:8080/browser-preview?transport=h264
+ws://127.0.0.1:8080/browser-preview/h264-stream
+```
+
+Treat `--transport h264`, `?transport=h264`, and `/<slug>/h264-stream` as
+active-development surfaces until WAN-shaped benchmark evidence is strong. The
+route shape, WebSocket message envelope, tuning defaults, and H.264 discovery
+details may change before the transport is promoted to a stable contract.
+
 The experimental H.264 path caps encoded width at 640 px to keep VideoToolbox
 tail latency bounded for browser streaming. The measured local 60 fps success
 profile uses `--transport h264 --fps 70`, which gives the browser enough source
 cadence to render at least 60 fps with p95 frame interval at or below 21 ms.
 This is a local-loopback tuning profile, not a production transport guarantee.
 
-You can also serve an existing active lease:
+### WebRTC Prototype
+
+The WebRTC prototype validates browser signaling without replacing the stable
+media or HID paths yet:
 
 ```sh
-simx serve --slug browser-preview --port 8080
+simx lease --slug browser-preview --ttl 10m --serve --port 8080 --transport webrtc
 ```
+
+Open:
+
+```text
+http://127.0.0.1:8080/browser-preview?transport=webrtc
+http://127.0.0.1:8080/browser-preview/webrtc
+POST http://127.0.0.1:8080/browser-preview/webrtc-offer
+```
+
+The WebRTC viewer creates an SDP offer and posts it to the signaling endpoint.
+For now, valid offers receive a structured `501 Not Implemented` response
+because SDP answers, ICE/DTLS/SRTP ownership, H.264 RTP packetization, and RTCP
+feedback are not implemented. HID/control remains on the existing WebSocket
+stream contract while video transport is evaluated.
 
 ## JSON Output For Agents
 
