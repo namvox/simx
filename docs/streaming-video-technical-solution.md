@@ -307,6 +307,13 @@ externally shaped profiles: apply the shaping with Network Link Conditioner, a
 relay, or another repeatable testbed before running the command, then record the
 tool in `SIMX_BENCH_NETWORK_SHAPER`.
 
+For non-local profiles, the viewer URL must also traverse the shaped path. The
+runner rejects `wan-good` and `wan-rough` when the measured viewer URL is still
+localhost or loopback. With auto-lease, bind the server to a reachable host with
+`SIMX_BENCH_HOST` and set `SIMX_VIEWER_URL` to the shaped URL that Playwright
+should measure. Use `SIMX_BENCH_ALLOW_LOOPBACK_WAN=1` only for metadata dry
+runs that should be labeled as loopback dry runs, not as WAN measurements.
+
 Run the direct local profile:
 
 ```sh
@@ -323,6 +330,8 @@ least 20 Mbps of available bandwidth:
 ```sh
 SIMX_BENCH_NETWORK_PROFILE=wan-good \
 SIMX_BENCH_NETWORK_SHAPER="Network Link Conditioner: 50 ms RTT, 0% loss, 20 Mbps" \
+SIMX_BENCH_HOST=0.0.0.0 \
+SIMX_VIEWER_URL="http://<shaped-host-or-relay>:8097/h264-pacing-bench?transport=h264" \
 SIMX_BENCH_AUTO_LEASE=1 \
 SIMX_BENCH_STRICT=1 \
 SIMX_BENCH_DURATION_MS=60000 \
@@ -335,6 +344,8 @@ about 8 Mbps of available bandwidth:
 ```sh
 SIMX_BENCH_NETWORK_PROFILE=wan-rough \
 SIMX_BENCH_NETWORK_SHAPER="Network Link Conditioner: 100 ms RTT, 1% loss, 8 Mbps" \
+SIMX_BENCH_HOST=0.0.0.0 \
+SIMX_VIEWER_URL="http://<shaped-host-or-relay>:8097/h264-pacing-bench?transport=h264" \
 SIMX_BENCH_AUTO_LEASE=1 \
 SIMX_BENCH_STRICT=1 \
 SIMX_BENCH_DURATION_MS=60000 \

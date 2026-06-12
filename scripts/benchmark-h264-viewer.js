@@ -10,6 +10,7 @@ const { chromium } = require("playwright");
 const autoLease = process.env.SIMX_BENCH_AUTO_LEASE === "1";
 const simxBin = process.env.SIMX_BIN || "target/debug/simx";
 const leaseSlug = process.env.SIMX_BENCH_SLUG || "h264-pacing-bench";
+const leaseHost = process.env.SIMX_BENCH_HOST || "127.0.0.1";
 const leasePort = Number(process.env.SIMX_BENCH_PORT || 8097);
 const leaseFps = Number(process.env.SIMX_BENCH_FPS || 70);
 const leaseTtl = process.env.SIMX_BENCH_TTL || "5m";
@@ -27,7 +28,7 @@ const headless = process.env.PLAYWRIGHT_HEADLESS !== "0";
 const targetUrl =
   process.env.SIMX_VIEWER_URL ||
   (autoLease
-    ? `http://127.0.0.1:${leasePort}/${leaseSlug}?transport=h264`
+    ? `http://${leaseHost}:${leasePort}/${leaseSlug}?transport=h264`
     : "http://127.0.0.1:8092/h264-browser-bench?transport=h264");
 const thresholds = {
   renderedFps: 60,
@@ -80,6 +81,7 @@ const networkProfiles = {
 };
 
 const networkProfile = parseNetworkProfile(networkProfileName);
+validateNetworkProfileTarget(networkProfile, targetUrl);
 
 const scenarioDefinitions = {
   "static-taps": {
@@ -380,6 +382,8 @@ function leaseArgs() {
     "--wait-timeout",
     leaseWaitTimeout,
     "--serve",
+    "--host",
+    leaseHost,
     "--port",
     String(leasePort),
     "--fps",
@@ -582,6 +586,26 @@ function parseNetworkProfile(name) {
       uplinkMbps: numberEnv("SIMX_BENCH_OBSERVED_UPLINK_MBPS"),
     },
   };
+}
+
+function validateNetworkProfileTarget(profile, viewerUrl) {
+  if (profile.name === "local" || process.env.SIMX_BENCH_ALLOW_LOOPBACK_WAN === "1") {
+    return;
+  }
+  const url = new URL(viewerUrl);
+  if (!isLoopbackHost(url.hostname)) {
+    return;
+  }
+  throw new Error(
+    `network profile "${profile.name}" cannot measure loopback viewer URL ${viewerUrl}. ` +
+      "Set SIMX_VIEWER_URL to the shaped viewer URL, bind auto-lease with SIMX_BENCH_HOST when needed, " +
+      "or set SIMX_BENCH_ALLOW_LOOPBACK_WAN=1 to explicitly record a loopback WAN-profile dry run."
+  );
+}
+
+function isLoopbackHost(hostname) {
+  const normalized = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
 }
 
 function numberEnv(name) {
