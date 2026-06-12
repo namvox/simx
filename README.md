@@ -192,9 +192,13 @@ is omitted and launches by default.
 simulator and watches Swift source changes by default:
 
 ```sh
-simx lease --slug feature-preview --ttl 15m --serve --port 8080
+simx lease --slug feature-preview --ttl 15m --json
 simx preview --slug feature-preview --package Package.swift --package-target App
 ```
+
+To watch the same simulator in a browser, run `simx serve --slug
+feature-preview --port 8080` in another terminal while `simx preview` watches
+for source changes.
 
 The command generates a disposable host project under the system temporary
 directory, builds and installs that host on the leased simulator, and discovers

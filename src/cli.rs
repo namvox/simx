@@ -950,6 +950,7 @@ fn run_with(cli: Cli, state_path: PathBuf) -> anyhow::Result<()> {
             run_preview(PreviewOptions {
                 slug,
                 udid: device.udid,
+                state_path,
                 package_swift: package,
                 package_target,
                 preview_filters: preview_filter,

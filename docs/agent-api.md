@@ -254,9 +254,14 @@ Agents should lease first, optionally serve the same lease for browser viewing,
 then run `simx preview` from a Swift package or pass an explicit manifest:
 
 ```sh
-simx lease --slug agent-a --ttl 10m --serve --port 8080
+simx lease --slug agent-a --ttl 10m --json
 simx preview --slug agent-a --package Package.swift --package-target App
 ```
+
+If browser viewing is needed, start `simx serve --slug agent-a --port 8080` in
+another process after leasing. `simx lease --serve` runs the server in the
+foreground and should not be placed before `simx preview` in the same shell
+script.
 
 `simx preview` requires an active lease. It generates a temporary host project,
 builds and installs that host on the leased simulator, and watches Swift source

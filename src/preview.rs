@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha1::{Digest, Sha1};
 
+use crate::pool::PoolService;
+
 const TARGET_NAME: &str = "PreviewHost";
 const PLUGIN_TARGET_NAME: &str = "PreviewReloadPlugin";
 const BUNDLE_ID: &str = "dev.simx.preview.host";
@@ -22,6 +24,7 @@ const RELOAD_DIR_NAME: &str = "swiftui-preview-browser";
 pub struct PreviewOptions {
     pub slug: String,
     pub udid: String,
+    pub state_path: PathBuf,
     pub package_swift: PathBuf,
     pub package_target: String,
     pub preview_filters: Vec<String>,
@@ -553,6 +556,13 @@ fn watch_package_tree(state: &mut PreviewState) -> anyhow::Result<()> {
     let mut snapshot = source_snapshot(&state.config.package_root)?;
     loop {
         thread::sleep(Duration::from_millis(500));
+        if !lease_still_active(state)? {
+            log(&format!(
+                "lease {} no longer owns simulator {}; stopping preview watcher",
+                state.options.slug, state.options.udid
+            ));
+            return Ok(());
+        }
         let next = source_snapshot(&state.config.package_root)?;
         if next != snapshot {
             snapshot = next;
@@ -562,6 +572,11 @@ fn watch_package_tree(state: &mut PreviewState) -> anyhow::Result<()> {
             }
         }
     }
+}
+
+fn lease_still_active(state: &PreviewState) -> anyhow::Result<bool> {
+    let mut service = PoolService::new(state.options.state_path.clone());
+    service.active_lease_matches_udid(&state.options.slug, &state.options.udid)
 }
 
 fn source_snapshot(root: &Path) -> anyhow::Result<HashSet<(PathBuf, u64, u64)>> {

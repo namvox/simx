@@ -248,6 +248,27 @@ impl PoolService {
         })
     }
 
+    pub fn active_lease_matches_udid(
+        &mut self,
+        lease_id: &str,
+        udid: &str,
+    ) -> anyhow::Result<bool> {
+        validate_lease_id(lease_id)?;
+        self.with_locked_state(|file| {
+            let mut state = read_state(file)?;
+            let now = now_unix_seconds()?;
+            let reaped = reap_expired_leases_at(&mut state, now);
+            let matches = state
+                .devices
+                .iter()
+                .any(|device| device.lease_id.as_deref() == Some(lease_id) && device.udid == udid);
+            if reaped {
+                write_state(file, &state)?;
+            }
+            Ok(matches)
+        })
+    }
+
     pub fn register_serve(
         &mut self,
         lease_id: &str,
