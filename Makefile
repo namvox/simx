@@ -1,4 +1,4 @@
-.PHONY: fmt test clippy check install doctor release-dry-run
+.PHONY: fmt test clippy check install doctor production-acceptance release-dry-run
 
 fmt:
 	cargo fmt --check
@@ -16,6 +16,9 @@ install:
 
 doctor:
 	cargo run -- doctor --json
+
+production-acceptance:
+	./scripts/production-acceptance.sh
 
 release-dry-run:
 	rm -rf dist
