@@ -141,6 +141,9 @@ Active-development H.264 route shape:
 ```text
 GET /<slug>?transport=h264
 WS  /<slug>/h264-stream
+GET /<slug>?transport=webrtc
+GET /<slug>/webrtc
+POST /<slug>/webrtc-offer
 ```
 
 The `--transport h264` serve option and H.264/WebCodecs route are experimental
@@ -161,6 +164,15 @@ The stable JPEG fallback remains `WS /<slug>/stream`. The current measured
 local-loopback 60 fps browser success profile uses `--transport h264 --fps 70`
 and a 640 px encoded-width cap; this is an experimental tuning detail, not a
 stable API guarantee or WAN readiness claim.
+
+The `--transport webrtc` serve option and WebRTC routes are a prototype surface
+for signaling validation and media architecture only. `GET /<slug>/webrtc`
+returns a JSON descriptor for the prototype. `POST /<slug>/webrtc-offer`
+accepts a browser SDP offer with a video m-line and `hid: "websocket"`, then
+returns a structured `501 Not Implemented` response until SDP answer generation,
+ICE/DTLS/SRTP ownership, H.264 RTP packetization, RTCP feedback, and congestion
+control are implemented. HID/control remains on the existing WebSocket contract
+for this prototype.
 
 Stable transport:
 

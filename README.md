@@ -223,6 +223,27 @@ active-development surfaces until WAN-shaped benchmark evidence is strong. The
 route shape, WebSocket message envelope, tuning defaults, and H.264 discovery
 details may change before the transport is promoted to a stable contract.
 
+The experimental WebRTC prototype validates browser signaling without replacing
+the stable media or HID paths yet:
+
+```sh
+simx lease --slug browser-preview --ttl 10m --serve --port 8080 --transport webrtc
+```
+
+Open:
+
+```text
+http://127.0.0.1:8080/browser-preview?transport=webrtc
+http://127.0.0.1:8080/browser-preview/webrtc
+POST http://127.0.0.1:8080/browser-preview/webrtc-offer
+```
+
+The WebRTC viewer creates an SDP offer and posts it to the signaling endpoint.
+For now, valid offers receive a structured `501 Not Implemented` response
+because SDP answers, ICE/DTLS/SRTP ownership, H.264 RTP packetization, and RTCP
+feedback are not implemented. HID/control remains on the existing WebSocket
+stream contract while video transport is evaluated.
+
 The public default is `--fps 60`. `--fps` is configurable and sets the target
 frame pacing used by the server; `--fps 120` remains supported as a
 host-dependent target. Actual source and sent frame rates depend on Simulator
@@ -301,7 +322,12 @@ simx lease --slug checkout-tests --ttl 10m --json
     "command": "simx serve --slug checkout-tests --host 127.0.0.1 --port 8080",
     "url": "http://127.0.0.1:8080/checkout-tests",
     "stream": "ws://127.0.0.1:8080/checkout-tests/stream",
-    "stats": "http://127.0.0.1:8080/checkout-tests/stats"
+    "h264_url": "http://127.0.0.1:8080/checkout-tests?transport=h264",
+    "h264_stream": "ws://127.0.0.1:8080/checkout-tests/h264-stream",
+    "webrtc_url": "http://127.0.0.1:8080/checkout-tests?transport=webrtc",
+    "webrtc_signaling": "http://127.0.0.1:8080/checkout-tests/webrtc-offer",
+    "stats": "http://127.0.0.1:8080/checkout-tests/stats",
+    "control_mode": "read-only"
   },
   "update": {
     "available": true,

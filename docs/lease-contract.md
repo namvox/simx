@@ -55,7 +55,12 @@ simx lease --slug agent-a --ttl 10m --json
     "command": "simx serve --slug agent-a --host 127.0.0.1 --port 8080",
     "url": "http://127.0.0.1:8080/agent-a",
     "stream": "ws://127.0.0.1:8080/agent-a/stream",
-    "stats": "http://127.0.0.1:8080/agent-a/stats"
+    "h264_url": "http://127.0.0.1:8080/agent-a?transport=h264",
+    "h264_stream": "ws://127.0.0.1:8080/agent-a/h264-stream",
+    "webrtc_url": "http://127.0.0.1:8080/agent-a?transport=webrtc",
+    "webrtc_signaling": "http://127.0.0.1:8080/agent-a/webrtc-offer",
+    "stats": "http://127.0.0.1:8080/agent-a/stats",
+    "control_mode": "read-only"
   }
 }
 ```
