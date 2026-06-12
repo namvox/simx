@@ -387,11 +387,11 @@ The runner served `--transport h264 --fps 70` and passed all strict gates:
 
 This is the current local-loopback success baseline for the new streaming path.
 The JPEG path remains the stable fallback. The H.264/WebSocket/WebCodecs path is
-still experimental and should be followed by WAN-shaped benchmarks and, for
-production internet sharing, a WebRTC transport. The local-loopback pass does
-not stabilize `--transport h264`, `?transport=h264`, `/<slug>/h264-stream`, the
-`h264Config`/`SXH1` message envelope, tuning defaults, or H.264 discovery
-details.
+still experimental and should be followed by full stress-scene benchmarks,
+WAN-shaped benchmarks, and, for production internet sharing, a WebRTC transport.
+The local-loopback pass does not stabilize `--transport h264`,
+`?transport=h264`, `/<slug>/h264-stream`, the `h264Config`/`SXH1` message
+envelope, tuning defaults, or H.264 discovery details.
 
 ## H.264 Stress Scene Runner
 
@@ -437,9 +437,18 @@ Auto-lease mode serves with `--control-mode single-controller` by default so
 these scene actions can affect the simulator; set `SIMX_BENCH_CONTROL_MODE` to
 test another mode.
 
-This section describes the runner capability, not a new measured result. The
-next baseline update should paste the real stress-scene metrics from a full
-live simulator run.
+Current status: runner capability exists, but the real full stress-scene
+measurement is still pending. A repo search found the scenario definitions,
+scene pages, and `scenarioResults` report shape in `scripts/` and `docs/`, but
+did not find a stored full-run report with real per-scene metrics for
+`static-taps`, `smooth-scroll`, `keyboard-entry`, `animation-heavy`,
+`full-motion`, and `text-heavy`.
+
+Do not treat the H.264 stress-scene item as done until a live simulator run is
+recorded here with the date, command, network/profile settings, and a per-scene
+result table. The local-loopback pass above remains useful evidence for the
+single active-motion benchmark, but it does not cover the full stress-scene
+suite and does not change the experimental status of H.264.
 
 ## H.264 WAN Profile Runner
 
