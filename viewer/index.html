@@ -327,19 +327,37 @@
     function connect() {
       const slug = "__SIMX_SLUG__";
       if (transport === "webrtc") {
+        connectStreamSocket(slug, true);
         connectWebrtcPrototype(slug);
         return;
       }
-      const streamPath = transport === "h264" ? "h264-stream" : "stream";
+      connectStreamSocket(slug, false);
+    }
+    function connectStreamSocket(slug, controlOnly) {
+      const streamPath = controlOnly ? "stream" : transport === "h264" ? "h264-stream" : "stream";
       socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/${encodeURIComponent(slug)}/${streamPath}`);
-      socket.binaryType = transport === "h264" ? "arraybuffer" : "blob";
+      socket.binaryType = !controlOnly && transport === "h264" ? "arraybuffer" : "blob";
       socket.onopen = () => {
-        setStatus("Live");
+        if (!controlOnly) setStatus("Live");
         send({ type: "resume" });
         requestKeyframe("connect");
       };
-      socket.onclose = () => { setStatus("Disconnected; reconnecting..."); setTimeout(connect, 800); };
-      socket.onerror = () => setStatus("Stream error");
+      socket.onclose = () => {
+        if (controlOnly) {
+          setPermission("HID WebSocket reconnecting...", false);
+          setTimeout(() => connectStreamSocket(slug, true), 800);
+        } else {
+          setStatus("Disconnected; reconnecting...");
+          setTimeout(connect, 800);
+        }
+      };
+      socket.onerror = () => {
+        if (controlOnly) {
+          setPermission("HID WebSocket error", false);
+        } else {
+          setStatus("Stream error");
+        }
+      };
       socket.onmessage = (event) => {
         if (typeof event.data === "string") {
           try {
@@ -364,6 +382,7 @@
           } catch (_) {}
           return;
         }
+        if (controlOnly) return;
         if (transport === "h264") {
           decodeVideoChunk(event.data);
           return;

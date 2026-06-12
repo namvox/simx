@@ -2048,12 +2048,15 @@ mod tests {
         let root_help = Cli::command().render_long_help().to_string();
         assert!(root_help.contains("stream       (stable JPEG)"));
         assert!(root_help.contains("h264-stream  (experimental H.264/WebCodecs)"));
+        assert!(root_help.contains("browser?transport=webrtc"));
+        assert!(root_help.contains("browser/webrtc"));
         assert!(root_help.contains("JPEG is the stable fallback"));
-        assert!(root_help.contains("H.264/WebCodecs is experimental"));
+        assert!(root_help.contains("H.264/WebCodecs and WebRTC are experimental"));
 
         for subcommand in ["lease", "serve"] {
             let help = help_for_subcommand(subcommand);
             assert!(help.contains("--transport h264"));
+            assert!(help.contains("--transport webrtc"));
             assert!(help.contains("jpeg is stable fallback, h264 is experimental"));
             assert!(help.contains("JPEG is the stable fallback"));
         }
