@@ -4,6 +4,16 @@
 
 - Add experimental `simx preview` for Swift Package-backed SwiftUI previews with
   host-app hot reload on an active leased simulator.
+- Add H.264 stress-scene benchmark runner coverage for simulator-visible
+  static taps, scrolling, keyboard entry, animation-heavy, full-motion, and
+  text-heavy scenarios.
+- Add WAN benchmark profile metadata and a loopback guard for repeatable H.264
+  benchmark reporting.
+- Add the experimental WebRTC prototype signaling surface while media delivery
+  remains incomplete.
+- Clarify that H.264 transport work is experimental and remains outside the
+  stable contract until stronger WAN evidence exists.
+- Add the production acceptance workflow and checklist for release readiness.
 
 ## v0.2.0 - 2026-06-12
 
