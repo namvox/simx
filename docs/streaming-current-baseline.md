@@ -389,3 +389,51 @@ This is the current local-loopback success baseline for the new streaming path.
 The JPEG path remains the stable fallback. The H.264/WebSocket/WebCodecs path is
 still experimental and should be followed by WAN-shaped benchmarks and, for
 production internet sharing, a WebRTC transport.
+
+## H.264 Stress Scene Runner
+
+The benchmark runner now supports repeatable stress-scene coverage instead of a
+single scroll loop. By default it runs:
+
+- `static-taps`
+- `smooth-scroll`
+- `keyboard-entry`
+- `animation-heavy`
+- `full-motion`
+- `text-heavy`
+
+Run all scenes against an auto-leased H.264 viewer:
+
+```sh
+PLAYWRIGHT_NODE_MODULES=/Users/namagent68/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules \
+SIMX_BENCH_AUTO_LEASE=1 \
+SIMX_BENCH_WAIT_TIMEOUT=5s \
+SIMX_BENCH_DURATION_MS=15000 \
+SIMX_BENCH_STRICT=1 \
+node scripts/benchmark-h264-viewer.js
+```
+
+Run a focused subset:
+
+```sh
+SIMX_BENCH_AUTO_LEASE=1 \
+SIMX_BENCH_SCENARIOS=smooth-scroll,animation-heavy,full-motion \
+node scripts/benchmark-h264-viewer.js
+```
+
+The output is one JSON report with aggregate `ok` and per-scene
+`scenarioResults`. Each scene records the same threshold checks, failures,
+browser metrics, server stats, console issues, and derived server
+drop/target-miss rates so H.264 runs can be compared across static taps,
+scrolling, keyboard entry, animation-heavy gestures, full-screen motion, and
+text-heavy input. The runner serves deterministic scene pages from a temporary
+local HTTP server and opens each one inside the leased simulator with
+`xcrun simctl openurl`, so animation and text changes are captured by the
+simulator stream instead of being Playwright-only overlays.
+Auto-lease mode serves with `--control-mode single-controller` by default so
+these scene actions can affect the simulator; set `SIMX_BENCH_CONTROL_MODE` to
+test another mode.
+
+This section describes the runner capability, not a new measured result. The
+next baseline update should paste the real stress-scene metrics from a full
+live simulator run.

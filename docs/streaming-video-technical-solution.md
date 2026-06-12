@@ -366,6 +366,10 @@ SIMX_BENCH_DURATION_MS=15000 \
 node scripts/benchmark-h264-viewer.js
 ```
 
+Auto-lease mode serves with `--control-mode single-controller` by default so
+the stress scenes can send touch and keyboard input to the simulator. Override
+that with `SIMX_BENCH_CONTROL_MODE` when testing another control mode.
+
 To measure an already-served H.264 viewer instead, provide `SIMX_VIEWER_URL`:
 
 ```sh
@@ -375,8 +379,38 @@ node scripts/benchmark-h264-viewer.js
 ```
 
 The script opens the viewer in Playwright, waits for H.264 frames to render,
-drives repeated drag gestures, reads the viewer's hidden `#metrics` report,
-fetches `/<slug>/stats`, and prints one JSON object.
+drives the configured benchmark scenes, reads the viewer's hidden `#metrics`
+report after each scene, fetches `/<slug>/stats`, and prints one JSON object.
+
+By default the runner executes every stress scene:
+
+- `static-taps`
+- `smooth-scroll`
+- `keyboard-entry`
+- `animation-heavy`
+- `full-motion`
+- `text-heavy`
+
+Use `SIMX_BENCH_SCENARIOS` to run a subset:
+
+```sh
+SIMX_BENCH_AUTO_LEASE=1 \
+SIMX_BENCH_STRICT=1 \
+SIMX_BENCH_DURATION_MS=15000 \
+SIMX_BENCH_SCENARIOS=static-taps,smooth-scroll,full-motion \
+node scripts/benchmark-h264-viewer.js
+```
+
+The output includes aggregate `ok`, `thresholds`, `scenarioNames`, `failures`,
+and a `scenarioResults` array. Each scenario result includes its name,
+description, duration, checks, failures, derived server drop/target-miss rates,
+browser metrics, server stats, console issues observed during that scene, and
+per-scene `ok`.
+
+The runner starts a local scene server and opens each deterministic scene inside
+the leased simulator before measuring. When measuring an already-served viewer
+without `SIMX_BENCH_AUTO_LEASE=1`, set `SIMX_BENCH_UDID` if the script should
+open those scenes in the simulator automatically.
 
 Set `SIMX_BENCH_STRICT=1` to make the script exit non-zero when the current
 metrics miss the 60 fps thresholds. Keep strict mode off while the experimental
