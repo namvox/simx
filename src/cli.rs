@@ -14,6 +14,7 @@ use crate::control::{
     SnapshotOptions,
 };
 use crate::pool::{LeaseOptions, PoolConfig, PoolDevice, PoolService};
+use crate::preview::{run_preview, PreviewOptions};
 use crate::simctl::{Simctl, XcrunSimctl};
 use crate::stream::{serve, ServeConfig, StreamControlMode, StreamStats, StreamTransport};
 use crate::update::{self, UpdateHint, UpdateOptions};
@@ -31,6 +32,9 @@ use crate::update::{self, UpdateHint, UpdateOptions};
 
 One-shot browser stream:
   simx lease --slug browser --serve --port 8080 --idle-timeout 5m
+
+SwiftUI preview hot reload:
+  simx preview --slug browser --package Package.swift --package-target App
 
 Native control:
   simx control snapshot --slug browser --json
@@ -213,6 +217,37 @@ Notes:
         #[arg(long)]
         no_launch: bool,
         /// Print machine-readable build, install, and launch details.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Render Swift Package SwiftUI previews with hot reload on an active lease.
+    #[command(after_help = "Examples:
+  simx preview --slug browser --package Package.swift --package-target App
+  simx preview --slug browser --package Package.swift --package-target App --preview-filter StatusRow
+  simx preview --slug browser --package Package.swift --package-target App --once --json
+
+Notes:
+  Requires an active lease. Generates a disposable host project outside the package,
+  installs it on the leased simulator, then watches Swift source changes by default.
+  On change, simx rebuilds a preview dylib, copies it into the host data container,
+  and notifies the running host without relaunching it.")]
+    Preview {
+        /// Active lease owner name to preview on.
+        #[arg(long)]
+        slug: String,
+        /// Path to the Swift package manifest.
+        #[arg(long, default_value = "Package.swift")]
+        package: PathBuf,
+        /// Swift Package target whose previews should be rendered.
+        #[arg(long)]
+        package_target: String,
+        /// Regex filter matched against preview type, group, and display names.
+        #[arg(long)]
+        preview_filter: Vec<String>,
+        /// Build and launch the preview host once instead of watching for hot reloads.
+        #[arg(long)]
+        once: bool,
+        /// Print machine-readable preview session details after launch.
         #[arg(long)]
         json: bool,
     },
@@ -898,6 +933,29 @@ fn run_with(cli: Cli, state_path: PathBuf) -> anyhow::Result<()> {
                 launch: !no_launch,
                 json,
                 update: update_hint,
+            })?;
+        }
+        Command::Preview {
+            slug,
+            package,
+            package_target,
+            preview_filter,
+            once,
+            json,
+        } => {
+            let device = service.active_lease(&slug)?;
+            simctl
+                .boot_if_needed(&device.udid)
+                .with_context(|| format!("failed to boot {}", device.udid))?;
+            run_preview(PreviewOptions {
+                slug,
+                udid: device.udid,
+                state_path,
+                package_swift: package,
+                package_target,
+                preview_filters: preview_filter,
+                watch: !once,
+                json,
             })?;
         }
         Command::Install {

@@ -170,6 +170,47 @@ fn lease_reuses_existing_lease_and_boots_allocated_device() {
 }
 
 #[test]
+fn active_lease_matches_udid_tracks_expiry_and_ownership() {
+    let temp = TempDir::new().unwrap();
+    let mut simctl = FakeSimctl::with_pool_devices(2);
+    let mut service = PoolService::new(service_path(&temp));
+    service
+        .init(
+            &mut simctl,
+            PoolConfig {
+                size: 2,
+                device_type: None,
+                runtime: None,
+            },
+        )
+        .unwrap();
+
+    let agent_a = service
+        .lease(
+            &mut simctl,
+            "agent-a",
+            lease_options(Duration::from_secs(1)),
+        )
+        .unwrap();
+    let agent_b = service
+        .lease(&mut simctl, "agent-b", short_lease_options())
+        .unwrap();
+
+    assert!(service
+        .active_lease_matches_udid("agent-a", &agent_a.udid)
+        .unwrap());
+    assert!(!service
+        .active_lease_matches_udid("agent-a", &agent_b.udid)
+        .unwrap());
+
+    thread::sleep(Duration::from_secs(2));
+
+    assert!(!service
+        .active_lease_matches_udid("agent-a", &agent_a.udid)
+        .unwrap());
+}
+
+#[test]
 fn same_slug_lease_extends_ttl_and_returns_same_device() {
     let temp = TempDir::new().unwrap();
     let mut simctl = FakeSimctl::with_pool_devices(1);
