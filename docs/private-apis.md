@@ -14,8 +14,8 @@ are responsible for network isolation and access control. The current browser
 stream is unauthenticated.
 
 `--fps 120` is supported as a configurable target, but actual frame rate depends
-on host machine performance, Simulator behavior, browser performance, JPEG
-encoding cost, and WebSocket backpressure.
+on Simulator capture, JPEG or H.264 encode, browser decode and render,
+transport backpressure, and host machine performance.
 
 `simx` is not affiliated with, endorsed by, or sponsored by Apple Inc. Apple,
 iOS, macOS, Xcode, and Simulator-related names are trademarks of Apple Inc.
