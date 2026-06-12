@@ -24,12 +24,12 @@ simx update --check
 simx update
 ```
 
-`v0.1.0` release binaries are Apple Silicon first. Homebrew support is not
-documented until it exists.
+Release binaries are Apple Silicon first. Homebrew support is not documented
+until it exists.
 
-## v0.1.0 Checklist
+## Release Checklist
 
-Before tagging `v0.1.0`:
+Before tagging a release:
 
 - MIT `LICENSE` is present.
 - `README.md` documents install, compatibility, security, and private API risk.
@@ -37,7 +37,8 @@ Before tagging `v0.1.0`:
 - CI is present for Linux non-simulator checks and macOS checks.
 - Secret/history scans have been run.
 - `raw/MindStone` is not present.
-- `CHANGELOG.md` has a `v0.1.0` section.
+- `Cargo.toml`, `Cargo.lock`, and `CHANGELOG.md` agree on the release version.
+- `CHANGELOG.md` has a dated release section for the version being tagged.
 - The browser streaming demo GIF exists at
   `docs/assets/simx-browser-streaming.gif`.
 - Checks pass:
@@ -55,8 +56,8 @@ rg -n "token|secret|password|api[_-]?key|PRIVATE KEY|BEGIN .*KEY|ghp_|sk-"
 After the checklist passes:
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 Pushing the tag runs `.github/workflows/release.yml`, which builds and uploads:

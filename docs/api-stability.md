@@ -1,6 +1,6 @@
 # API And CLI Stability
 
-This document defines the public `simx` contract for `v0.1.0`.
+This document defines the public `simx` contract for `v0.2.0`.
 
 `simx` follows semantic versioning:
 
@@ -13,7 +13,7 @@ minor release when practical.
 
 ## Stable Commands
 
-The following commands are stable in `v0.1.0`:
+The following commands are stable in `v0.2.0`:
 
 ```sh
 simx init
@@ -27,6 +27,7 @@ simx doctor
 simx run
 simx install
 simx update
+simx control
 ```
 
 Human-readable text output may change. Agents should use JSON output where
@@ -34,7 +35,7 @@ available.
 
 ## Stable Agent JSON
 
-The following machine-readable outputs are stable in `v0.1.0`:
+The following machine-readable outputs are stable in `v0.2.0`:
 
 ```sh
 simx status --json
@@ -44,6 +45,14 @@ simx doctor --json
 simx run --json
 simx install --json
 simx update --json
+simx control snapshot --json
+simx control tap --json
+simx control touch --json
+simx control swipe --json
+simx control drag --json
+simx control key --json
+simx control paste --json
+simx control button --json
 simx --json-errors ...
 ```
 
@@ -59,8 +68,8 @@ additive `update` object:
 {
   "update": {
     "available": true,
-    "current_version": "0.1.0",
-    "latest_version": "0.1.1",
+    "current_version": "0.2.0",
+    "latest_version": "0.2.1",
     "command": "simx update"
   }
 }
@@ -92,7 +101,7 @@ lease --wait-timeout: 60s
 renew --ttl: 30m
 ```
 
-There is no maximum TTL in `v0.1.0`.
+There is no maximum TTL in `v0.2.0`.
 
 ## Streaming Contract
 
@@ -197,7 +206,7 @@ stable data contract yet.
 
 ## HID Message Core
 
-The core HID/control message families are frozen in `v0.1.0`:
+The core HID/control message families from `v0.1.0` remain stable:
 
 - Touch: `type: "touch"`.
 - Keyboard: `type: "key"`.
@@ -207,6 +216,9 @@ The core HID/control message families are frozen in `v0.1.0`:
 Additive fields and new message types may be added in minor releases. See
 [hid-contract.md](hid-contract.md) for the wire format.
 
-`v0.1.1` adds an additive long-press scroll helper:
+`v0.1.1` added an additive long-press scroll helper:
 
 - Long-press scroll: `type: "longPressScroll"`.
+
+`v0.2.0` adds additive CLI control commands for snapshots and native HID
+actions. These commands do not change the WebSocket HID message core.
