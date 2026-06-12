@@ -388,7 +388,10 @@ The runner served `--transport h264 --fps 70` and passed all strict gates:
 This is the current local-loopback success baseline for the new streaming path.
 The JPEG path remains the stable fallback. The H.264/WebSocket/WebCodecs path is
 still experimental and should be followed by WAN-shaped benchmarks and, for
-production internet sharing, a WebRTC transport.
+production internet sharing, a WebRTC transport. The local-loopback pass does
+not stabilize `--transport h264`, `?transport=h264`, `/<slug>/h264-stream`, the
+`h264Config`/`SXH1` message envelope, tuning defaults, or H.264 discovery
+details.
 
 ## H.264 Stress Scene Runner
 

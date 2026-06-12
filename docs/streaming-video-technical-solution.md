@@ -73,7 +73,9 @@ delivery of every old frame.
 ## Proposed Solution
 
 Move the primary internet streaming path from JPEG-over-WebSocket to
-hardware-encoded video.
+hardware-encoded video. This is still the target direction, not the current
+stable contract: JPEG-over-WebSocket remains the stable browser-stream fallback
+while H.264/WebCodecs is experimental.
 
 The proposed target pipeline is:
 
@@ -112,8 +114,8 @@ The initial encoder should target:
 Prefer WebRTC for the long-term internet transport because it is designed for
 real-time media, network adaptation, jitter handling, and browser playback.
 
-Keep the existing JPEG-over-WebSocket path as a local/debug fallback while the
-new path matures.
+Keep the existing JPEG-over-WebSocket path as the stable local/debug fallback
+while the new path matures.
 
 A staged implementation can be:
 
@@ -160,6 +162,9 @@ Client-to-server HID/control messages use the existing JSON text message shape.
 This route is for local validation and benchmark development. It is not the
 final internet transport; WebRTC remains the target for production-quality WAN
 streaming.
+Until WAN-shaped benchmark data is strong enough to promote the transport, the
+H.264 route shape, message envelope, tuning defaults, and discovery details are
+active-development surfaces rather than stable API guarantees.
 
 ### Producer And Fanout
 
@@ -413,6 +418,6 @@ without `SIMX_BENCH_AUTO_LEASE=1`, set `SIMX_BENCH_UDID` if the script should
 open those scenes in the simulator automatically.
 
 Set `SIMX_BENCH_STRICT=1` to make the script exit non-zero when the current
-metrics miss the 60 fps thresholds. Keep strict mode off while the experimental
-transport is still below target so CI can collect comparable reports without
-failing the whole check.
+metrics miss the 60 fps thresholds. Use strict mode for explicit benchmark gates
+and keep report-only runs available while the H.264/WebCodecs transport remains
+experimental and WAN evidence is incomplete.

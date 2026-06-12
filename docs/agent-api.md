@@ -34,6 +34,10 @@ Lease and renew return:
 - `serve.stats`
 - `serve.control_mode`
 
+`serve.stream` is the stable JPEG-over-WebSocket fallback route. H.264-specific
+discovery details such as `?transport=h264` and `/<slug>/h264-stream` are
+experimental until the transport is promoted in [api-stability.md](api-stability.md).
+
 Status returns:
 
 - pool size
