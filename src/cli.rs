@@ -34,7 +34,8 @@ One-shot browser stream:
 
 Open:
   http://127.0.0.1:8080/browser
-  ws://127.0.0.1:8080/browser/stream
+  ws://127.0.0.1:8080/browser/stream       (JPEG)
+  ws://127.0.0.1:8080/browser/h264-stream  (H.264)
   http://127.0.0.1:8080/browser/stats"
 )]
 struct Cli {
@@ -136,7 +137,8 @@ Notes:
 
 Viewer:
   http://127.0.0.1:<port>/<slug>
-  ws://127.0.0.1:<port>/<slug>/stream
+  ws://127.0.0.1:<port>/<slug>/stream       (JPEG)
+  ws://127.0.0.1:<port>/<slug>/h264-stream  (H.264)
   http://127.0.0.1:<port>/<slug>/stats")]
     Serve {
         /// Active lease owner name to serve.
