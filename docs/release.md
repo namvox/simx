@@ -31,6 +31,9 @@ until it exists.
 
 Before tagging a release:
 
+- Run the production acceptance workflow in
+  [production-acceptance.md](production-acceptance.md) and attach or summarize
+  the evidence directory in the release PR.
 - MIT `LICENSE` is present.
 - `README.md` documents install, compatibility, security, and private API risk.
 - `SECURITY.md` names the disclosure contact.
@@ -47,6 +50,7 @@ Before tagging a release:
 - Checks pass:
 
 ```sh
+make production-acceptance
 make check
 make release-dry-run
 simx doctor --json
