@@ -437,3 +437,69 @@ test another mode.
 This section describes the runner capability, not a new measured result. The
 next baseline update should paste the real stress-scene metrics from a full
 live simulator run.
+
+## H.264 WAN Profile Runner
+
+The benchmark runner now records repeatable network profile metadata in its JSON
+report. `SIMX_BENCH_NETWORK_PROFILE` accepts:
+
+- `local`: direct localhost or LAN measurement with no shaping. This is the
+  default and preserves the existing local benchmark behavior.
+- `wan-good`: externally shaped measurement, about 50 ms RTT, 0% packet loss,
+  and at least 20 Mbps available bandwidth.
+- `wan-rough`: externally shaped measurement, about 100 ms RTT, about 1% packet
+  loss, and about 8 Mbps available bandwidth.
+
+The runner does not apply OS-level shaping because that is host-specific and
+often requires elevated privileges. Apply the WAN condition with Network Link
+Conditioner, a relay, or another repeatable testbed before running the
+`wan-good` or `wan-rough` commands. The report records the selected profile,
+whether it is directly measured or externally shaped, optional shaper notes,
+host/macOS/Xcode metadata, browser channel/version, simulator UDID/runtime when
+available, lease command/config, benchmark duration, scenarios, and timestamp.
+
+Local direct run:
+
+```sh
+PLAYWRIGHT_NODE_MODULES=/Users/namagent68/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules \
+SIMX_BENCH_NETWORK_PROFILE=local \
+SIMX_BENCH_AUTO_LEASE=1 \
+SIMX_BENCH_WAIT_TIMEOUT=5s \
+SIMX_BENCH_DURATION_MS=60000 \
+SIMX_BENCH_STRICT=1 \
+node scripts/benchmark-h264-viewer.js
+```
+
+Good WAN run after applying about 50 ms RTT, 0% packet loss, and at least
+20 Mbps available bandwidth:
+
+```sh
+PLAYWRIGHT_NODE_MODULES=/Users/namagent68/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules \
+SIMX_BENCH_NETWORK_PROFILE=wan-good \
+SIMX_BENCH_NETWORK_SHAPER="Network Link Conditioner: 50 ms RTT, 0% loss, 20 Mbps" \
+SIMX_BENCH_AUTO_LEASE=1 \
+SIMX_BENCH_WAIT_TIMEOUT=5s \
+SIMX_BENCH_DURATION_MS=60000 \
+SIMX_BENCH_STRICT=1 \
+node scripts/benchmark-h264-viewer.js
+```
+
+Rough WAN run after applying about 100 ms RTT, 1% packet loss, and about
+8 Mbps available bandwidth:
+
+```sh
+PLAYWRIGHT_NODE_MODULES=/Users/namagent68/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules \
+SIMX_BENCH_NETWORK_PROFILE=wan-rough \
+SIMX_BENCH_NETWORK_SHAPER="Network Link Conditioner: 100 ms RTT, 1% loss, 8 Mbps" \
+SIMX_BENCH_AUTO_LEASE=1 \
+SIMX_BENCH_WAIT_TIMEOUT=5s \
+SIMX_BENCH_DURATION_MS=60000 \
+SIMX_BENCH_STRICT=1 \
+node scripts/benchmark-h264-viewer.js
+```
+
+If the shaper also produces measured values, include them with
+`SIMX_BENCH_OBSERVED_RTT_MS`, `SIMX_BENCH_OBSERVED_LOSS_PERCENT`,
+`SIMX_BENCH_OBSERVED_DOWNLINK_MBPS`, `SIMX_BENCH_OBSERVED_UPLINK_MBPS`, and
+`SIMX_BENCH_NETWORK_NOTES`. This keeps local, good WAN, and rough WAN reports
+comparable without making network shaping part of simx's stable CLI surface.
