@@ -236,6 +236,7 @@ async function waitForInitialFrame(page) {
 async function runScenario(page, screen, name, scenario, leaseInfo, consoleIssues) {
   const setup = await setupScenario(scenario, leaseInfo);
   await page.waitForTimeout(sceneSettleMs);
+  const baselineStats = await readStats(page.url());
   await page.evaluate(() => window.simxMetrics?.reset?.());
   const startedAt = Date.now();
   const deadline = startedAt + scenarioDurationMs;
@@ -254,6 +255,7 @@ async function runScenario(page, screen, name, scenario, leaseInfo, consoleIssue
     status,
     metrics,
     stats,
+    baselineStats,
     consoleIssues: scenarioConsoleIssues,
   });
 }
@@ -463,8 +465,18 @@ function buildSuiteReport(url, renderedInitialFrame, scenarios) {
   return report;
 }
 
-function buildScenarioReport({ name, title, description, setup, status, metrics, stats, consoleIssues }) {
-  const dropRate = serverDropRate(stats);
+function buildScenarioReport({
+  name,
+  title,
+  description,
+  setup,
+  status,
+  metrics,
+  stats,
+  baselineStats,
+  consoleIssues,
+}) {
+  const dropRate = serverDropRate(stats, baselineStats);
   const targetMissRate = serverTargetMissRate(stats);
   const checks = {
     renderedFps: metrics.renderedFps >= thresholds.renderedFps,
@@ -528,11 +540,16 @@ function serverTargetMissRate(stats) {
   return Number((Math.max(0, targetFps - sentFps) / targetFps).toFixed(4));
 }
 
-function serverDropRate(stats) {
-  if (!stats) return null;
-  const sourceFrames = Number(stats.source_frames);
-  const droppedFrames = Number(stats.dropped_frames);
-  if (!Number.isFinite(sourceFrames) || !Number.isFinite(droppedFrames) || sourceFrames <= 0) {
+function serverDropRate(stats, baselineStats) {
+  if (!stats || !baselineStats) return null;
+  const sourceFrames = Number(stats.source_frames) - Number(baselineStats.source_frames);
+  const droppedFrames = Number(stats.dropped_frames) - Number(baselineStats.dropped_frames);
+  if (
+    !Number.isFinite(sourceFrames) ||
+    !Number.isFinite(droppedFrames) ||
+    sourceFrames <= 0 ||
+    droppedFrames < 0
+  ) {
     return null;
   }
   return Number((droppedFrames / sourceFrames).toFixed(4));
