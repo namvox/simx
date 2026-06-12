@@ -630,6 +630,7 @@ fn estimate_tokens(chars: usize) -> usize {
     chars.div_ceil(4)
 }
 
+#[cfg(target_os = "macos")]
 fn duration_millis_i32(duration: Duration) -> i32 {
     duration.as_millis().clamp(1, i32::MAX as u128) as i32
 }
@@ -753,6 +754,23 @@ struct NativeHidSession;
 impl NativeHidSession {
     fn start(udid: &str, wait_timeout: Duration) -> anyhow::Result<Self> {
         let _ = (udid, wait_timeout);
+        bail!("HID input requires macOS private Simulator APIs");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+impl HidTarget for NativeHidSession {
+    fn send_touch(&self, nx: f64, ny: f64, down: bool) -> anyhow::Result<()> {
+        let _ = (nx, ny, down);
+        bail!("HID input requires macOS private Simulator APIs");
+    }
+
+    fn send_key(&self, key_code: u16, down: bool) -> anyhow::Result<()> {
+        let _ = (key_code, down);
+        bail!("HID input requires macOS private Simulator APIs");
+    }
+
+    fn press_home(&self) -> anyhow::Result<()> {
         bail!("HID input requires macOS private Simulator APIs");
     }
 }
@@ -992,6 +1010,7 @@ mod tests {
         assert_eq!(error.to_string(), "unsupported KeyboardEvent.code: KeyFoo");
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn hid_timeout_is_clamped_to_native_milliseconds() {
         assert_eq!(duration_millis_i32(Duration::ZERO), 1);
