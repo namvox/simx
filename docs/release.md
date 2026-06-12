@@ -41,6 +41,9 @@ Before tagging a release:
 - `CHANGELOG.md` has a dated release section for the version being tagged.
 - The browser streaming demo GIF exists at
   `docs/assets/simx-browser-streaming.gif`.
+- Release notes do not describe H.264/WebCodecs as stable unless
+  [api-stability.md](api-stability.md) has promoted `--transport h264`,
+  `?transport=h264`, and `/<slug>/h264-stream` from experimental status.
 - Checks pass:
 
 ```sh

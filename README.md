@@ -203,8 +203,9 @@ ws://127.0.0.1:8080/browser-preview/stream
 http://127.0.0.1:8080/browser-preview/stats
 ```
 
-The default transport is JPEG-over-WebSocket. The experimental hardware H.264
-path can be served directly with:
+The default transport is JPEG-over-WebSocket and is the stable fallback for
+browser streaming. The hardware H.264/WebCodecs path is experimental and can be
+served directly with:
 
 ```sh
 simx lease --slug browser-preview --ttl 10m --serve --port 8080 --transport h264
@@ -216,6 +217,11 @@ Open:
 http://127.0.0.1:8080/browser-preview?transport=h264
 ws://127.0.0.1:8080/browser-preview/h264-stream
 ```
+
+Treat `--transport h264`, `?transport=h264`, and `/<slug>/h264-stream` as
+active-development surfaces until WAN-shaped benchmark evidence is strong. The
+route shape, WebSocket message envelope, tuning defaults, and H.264 discovery
+details may change before the transport is promoted to a stable contract.
 
 The public default is `--fps 60`. `--fps` is configurable and sets the target
 frame pacing used by the server; `--fps 120` remains supported as a
@@ -267,6 +273,7 @@ The experimental H.264 path caps encoded width at 640 px to keep VideoToolbox
 tail latency bounded for browser streaming. The measured local 60 fps success
 profile uses `--transport h264 --fps 70`, which gives the browser enough source
 cadence to render at least 60 fps with p95 frame interval at or below 21 ms.
+This is a local-loopback tuning profile, not a production transport guarantee.
 
 You can also serve an existing active lease:
 

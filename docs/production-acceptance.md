@@ -39,6 +39,11 @@ This milestone is complete only when all checks below pass.
 - latest send age
 - p50/p95 delivery latency
 
+JPEG-over-WebSocket is the stable browser-stream fallback for this milestone.
+`--transport h264`, `?transport=h264`, and `/<slug>/h264-stream` remain
+experimental until WAN-shaped benchmark runs show the transport is ready for
+promotion.
+
 ## Multi-Client Behavior
 
 - Multiple clients may connect to the same stream.

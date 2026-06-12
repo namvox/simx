@@ -38,9 +38,11 @@ Native control:
 
 Open:
   http://127.0.0.1:8080/browser
-  ws://127.0.0.1:8080/browser/stream       (JPEG)
-  ws://127.0.0.1:8080/browser/h264-stream  (H.264)
-  http://127.0.0.1:8080/browser/stats"
+  ws://127.0.0.1:8080/browser/stream       (stable JPEG)
+  ws://127.0.0.1:8080/browser/h264-stream  (experimental H.264/WebCodecs)
+  http://127.0.0.1:8080/browser/stats
+
+JPEG is the stable fallback. H.264/WebCodecs is experimental until WAN benchmark evidence is strong."
 )]
 struct Cli {
     /// Print CLI errors as stable JSON.
@@ -85,7 +87,8 @@ enum Command {
 
 Notes:
   Reusing a slug renews and reuses its active lease unless --new is set.
-  With --serve, open http://<host>:<port>/<slug> in a browser.")]
+  With --serve, open http://<host>:<port>/<slug> in a browser.
+  JPEG is the stable fallback; --transport h264 and /<slug>/h264-stream are experimental.")]
     Lease {
         /// Stable lease owner name. Reusing the same slug renews/reuses the lease.
         #[arg(long)]
@@ -114,7 +117,7 @@ Notes:
         /// Target stream frames per second.
         #[arg(long, default_value_t = 60)]
         fps: u32,
-        /// Stream transport to serve to browsers.
+        /// Stream transport to serve to browsers; jpeg is stable fallback, h264 is experimental.
         #[arg(long, value_enum, default_value = "jpeg")]
         transport: CliTransport,
         /// Browser input ownership policy for the served simulator.
@@ -141,9 +144,11 @@ Notes:
 
 Viewer:
   http://127.0.0.1:<port>/<slug>
-  ws://127.0.0.1:<port>/<slug>/stream       (JPEG)
-  ws://127.0.0.1:<port>/<slug>/h264-stream  (H.264)
-  http://127.0.0.1:<port>/<slug>/stats")]
+  ws://127.0.0.1:<port>/<slug>/stream       (stable JPEG)
+  ws://127.0.0.1:<port>/<slug>/h264-stream  (experimental H.264/WebCodecs)
+  http://127.0.0.1:<port>/<slug>/stats
+
+JPEG is the stable fallback. H.264/WebCodecs is experimental until WAN benchmark evidence is strong.")]
     Serve {
         /// Active lease owner name to serve.
         #[arg(long)]
@@ -160,7 +165,7 @@ Viewer:
         /// Target stream frames per second.
         #[arg(long, default_value_t = 60)]
         fps: u32,
-        /// Stream transport to serve to browsers.
+        /// Stream transport to serve to browsers; jpeg is stable fallback, h264 is experimental.
         #[arg(long, value_enum, default_value = "jpeg")]
         transport: CliTransport,
         /// Browser input ownership policy for the served simulator.
@@ -2004,7 +2009,34 @@ fn default_state_path() -> anyhow::Result<PathBuf> {
 mod tests {
     use std::fs;
 
+    use clap::CommandFactory;
+
     use super::*;
+
+    fn help_for_subcommand(name: &str) -> String {
+        let mut command = Cli::command();
+        command
+            .find_subcommand_mut(name)
+            .unwrap_or_else(|| panic!("missing {name} subcommand"))
+            .render_long_help()
+            .to_string()
+    }
+
+    #[test]
+    fn help_labels_h264_transport_as_experimental() {
+        let root_help = Cli::command().render_long_help().to_string();
+        assert!(root_help.contains("stream       (stable JPEG)"));
+        assert!(root_help.contains("h264-stream  (experimental H.264/WebCodecs)"));
+        assert!(root_help.contains("JPEG is the stable fallback"));
+        assert!(root_help.contains("H.264/WebCodecs is experimental"));
+
+        for subcommand in ["lease", "serve"] {
+            let help = help_for_subcommand(subcommand);
+            assert!(help.contains("--transport h264"));
+            assert!(help.contains("jpeg is stable fallback, h264 is experimental"));
+            assert!(help.contains("JPEG is the stable fallback"));
+        }
+    }
 
     #[cfg_attr(not(target_os = "macos"), ignore = "plutil is only available on macOS")]
     #[test]
