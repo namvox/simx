@@ -13,13 +13,13 @@ Use `simx doctor --json` to check a host before assigning agent work to it.
 
 ## Architecture
 
-`v0.1.0` release binaries are Apple Silicon first:
+Release binaries are Apple Silicon first:
 
 ```text
 aarch64-apple-darwin
 ```
 
-Intel macOS may build from source, but it is best effort for `v0.1.0`.
+Intel macOS may build from source, but it is best effort.
 
 ## Xcode And macOS
 

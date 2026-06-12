@@ -58,10 +58,11 @@ See [docs/compatibility.md](docs/compatibility.md) for compatibility details.
 
 ## Stability
 
-`simx` uses semantic versioning. The `v0.1.0` stable surface includes the pool,
-lease, serve, release, clean, doctor, run, and install commands, plus JSON output
-for agent-facing commands. See [docs/api-stability.md](docs/api-stability.md)
-for the stable CLI, JSON, lease, streaming, and HID contracts.
+`simx` uses semantic versioning. The stable surface includes the pool, lease,
+serve, release, clean, doctor, run, install, update, and control commands, plus
+JSON output for agent-facing commands. See
+[docs/api-stability.md](docs/api-stability.md) for the stable CLI, JSON, lease,
+streaming, and HID contracts.
 
 ## Install
 
@@ -97,7 +98,7 @@ When a newer release is known, normal human-readable commands print a stderr
 hint such as:
 
 ```text
-simx 0.1.1 is available; current version is 0.1.0. Run `simx update` to upgrade.
+simx 0.2.1 is available; current version is 0.2.0. Run `simx update` to upgrade.
 ```
 
 The check is cached for 24 hours and can be disabled with `--no-update-check`
@@ -297,8 +298,8 @@ simx lease --slug checkout-tests --ttl 10m --json
   },
   "update": {
     "available": true,
-    "current_version": "0.1.0",
-    "latest_version": "0.1.1",
+    "current_version": "0.2.0",
+    "latest_version": "0.2.1",
     "command": "simx update"
   }
 }

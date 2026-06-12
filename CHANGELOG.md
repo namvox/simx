@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.2.0 - 2026-06-12
+
 - Add `simx control` for native agent snapshots and HID commands,
   with metadata-only snapshot JSON as the token-efficient default.
 - Add explicit streaming control modes with read-only as the default, plus
