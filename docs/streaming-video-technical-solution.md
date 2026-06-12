@@ -296,7 +296,7 @@ The stats endpoint should expose rolling and lifetime values for:
 - connected clients
 - per-client send queue depth or latest-frame lag
 
-### Benchmark Scenarios
+### Benchmark Network Profiles
 
 Run the same benchmark suite in at least these profiles:
 
@@ -305,9 +305,62 @@ Run the same benchmark suite in at least these profiles:
   bitrate.
 - `wan-rough`: about 100 ms RTT, around 1% packet loss, constrained bandwidth.
 
-Use a repeatable network shaping tool where possible, such as Network Link
-Conditioner or a documented relay/tunnel setup. The exact tool matters less than
-repeatability and recording the profile in benchmark output.
+The benchmark runner records the selected profile with
+`SIMX_BENCH_NETWORK_PROFILE`. It does not change system network settings.
+`local` is measured directly with no shaping. `wan-good` and `wan-rough` are
+externally shaped profiles: apply the shaping with Network Link Conditioner, a
+relay, or another repeatable testbed before running the command, then record the
+tool in `SIMX_BENCH_NETWORK_SHAPER`.
+
+For non-local profiles, the viewer URL must also traverse the shaped path. The
+runner rejects `wan-good` and `wan-rough` when the measured viewer URL is still
+localhost or loopback. With auto-lease, bind the server to a reachable host with
+`SIMX_BENCH_HOST` and set `SIMX_VIEWER_URL` to the shaped URL that Playwright
+should measure. Use `SIMX_BENCH_ALLOW_LOOPBACK_WAN=1` only for metadata dry
+runs that should be labeled as loopback dry runs, not as WAN measurements.
+
+Run the direct local profile:
+
+```sh
+SIMX_BENCH_NETWORK_PROFILE=local \
+SIMX_BENCH_AUTO_LEASE=1 \
+SIMX_BENCH_STRICT=1 \
+SIMX_BENCH_DURATION_MS=60000 \
+node scripts/benchmark-h264-viewer.js
+```
+
+Run the good WAN profile after applying about 50 ms RTT, 0% packet loss, and at
+least 20 Mbps of available bandwidth:
+
+```sh
+SIMX_BENCH_NETWORK_PROFILE=wan-good \
+SIMX_BENCH_NETWORK_SHAPER="Network Link Conditioner: 50 ms RTT, 0% loss, 20 Mbps" \
+SIMX_BENCH_HOST=0.0.0.0 \
+SIMX_VIEWER_URL="http://<shaped-host-or-relay>:8097/h264-pacing-bench?transport=h264" \
+SIMX_BENCH_AUTO_LEASE=1 \
+SIMX_BENCH_STRICT=1 \
+SIMX_BENCH_DURATION_MS=60000 \
+node scripts/benchmark-h264-viewer.js
+```
+
+Run the rough WAN profile after applying about 100 ms RTT, 1% packet loss, and
+about 8 Mbps of available bandwidth:
+
+```sh
+SIMX_BENCH_NETWORK_PROFILE=wan-rough \
+SIMX_BENCH_NETWORK_SHAPER="Network Link Conditioner: 100 ms RTT, 1% loss, 8 Mbps" \
+SIMX_BENCH_HOST=0.0.0.0 \
+SIMX_VIEWER_URL="http://<shaped-host-or-relay>:8097/h264-pacing-bench?transport=h264" \
+SIMX_BENCH_AUTO_LEASE=1 \
+SIMX_BENCH_STRICT=1 \
+SIMX_BENCH_DURATION_MS=60000 \
+node scripts/benchmark-h264-viewer.js
+```
+
+Optional measured values can be included in the report with
+`SIMX_BENCH_OBSERVED_RTT_MS`, `SIMX_BENCH_OBSERVED_LOSS_PERCENT`,
+`SIMX_BENCH_OBSERVED_DOWNLINK_MBPS`, `SIMX_BENCH_OBSERVED_UPLINK_MBPS`, and
+free-form `SIMX_BENCH_NETWORK_NOTES`.
 
 ### Test Content
 
@@ -330,8 +383,39 @@ Every benchmark run should produce a machine-readable report, for example:
 ```json
 {
   "transport": "h264-websocket-webcodecs",
-  "target_fps": 70,
+  "timestamp": "2026-06-12T10:00:00.000Z",
   "durationMs": 15000,
+  "network": {
+    "name": "local",
+    "measuredDirectly": true,
+    "target": {
+      "rttMs": 0,
+      "packetLossPercent": 0,
+      "bandwidthMbps": null
+    }
+  },
+  "environment": {
+    "host": {
+      "model": "Mac16,10",
+      "macOS": {
+        "productVersion": "26.5.1",
+        "buildVersion": "25F80"
+      }
+    },
+    "browser": {
+      "name": "chromium",
+      "channel": "chrome",
+      "version": "..."
+    },
+    "simulator": {
+      "udid": "...",
+      "runtime": "com.apple.CoreSimulator.SimRuntime.iOS-26-5"
+    }
+  },
+  "scenarioNames": ["static-taps", "smooth-scroll"],
+  "lease": {
+    "command": "target/debug/simx lease --slug h264-pacing-bench --ttl 5m --wait-timeout 5s --serve --port 8097 --fps 70 --transport h264 --control-mode single-controller --idle-timeout 2m --json"
+  },
   "thresholds": {
     "renderedFps": 60,
     "frameIntervalP95Ms": 21,
@@ -355,9 +439,10 @@ Every benchmark run should produce a machine-readable report, for example:
 }
 ```
 
-The report should also include the host model, macOS version, Xcode version,
-browser name/version, simulator runtime, network profile, and exact `simx`
-command used.
+The report should include the host model, macOS version, Xcode version, browser
+name/version/channel when available, simulator UDID/runtime when available, the
+selected network profile, exact `simx` auto-lease command when the runner starts
+the stream, benchmark duration, scenarios, and timestamp.
 
 ### Local Runner
 

@@ -10,6 +10,7 @@ const { chromium } = require("playwright");
 const autoLease = process.env.SIMX_BENCH_AUTO_LEASE === "1";
 const simxBin = process.env.SIMX_BIN || "target/debug/simx";
 const leaseSlug = process.env.SIMX_BENCH_SLUG || "h264-pacing-bench";
+const leaseHost = process.env.SIMX_BENCH_HOST || "127.0.0.1";
 const leasePort = Number(process.env.SIMX_BENCH_PORT || 8097);
 const leaseFps = Number(process.env.SIMX_BENCH_FPS || 70);
 const leaseTtl = process.env.SIMX_BENCH_TTL || "5m";
@@ -21,12 +22,13 @@ const sceneHost = process.env.SIMX_BENCH_SCENE_HOST || "127.0.0.1";
 const scenePort = Number(process.env.SIMX_BENCH_SCENE_PORT || 8897);
 const scenarioDurationMs = Number(process.env.SIMX_BENCH_DURATION_MS || 15_000);
 const sceneSettleMs = Number(process.env.SIMX_BENCH_SCENE_SETTLE_MS || 1_500);
+const networkProfileName = process.env.SIMX_BENCH_NETWORK_PROFILE || "local";
 const channel = process.env.PLAYWRIGHT_CHANNEL || "chrome";
 const headless = process.env.PLAYWRIGHT_HEADLESS !== "0";
 const targetUrl =
   process.env.SIMX_VIEWER_URL ||
   (autoLease
-    ? `http://127.0.0.1:${leasePort}/${leaseSlug}?transport=h264`
+    ? `http://${leaseHost}:${leasePort}/${leaseSlug}?transport=h264`
     : "http://127.0.0.1:8092/h264-browser-bench?transport=h264");
 const thresholds = {
   renderedFps: 60,
@@ -44,6 +46,42 @@ const sceneBaseUrl =
 
 let leaseProcess = null;
 let sceneServer = null;
+
+const networkProfiles = {
+  local: {
+    label: "Local loopback/LAN",
+    measuredDirectly: true,
+    shaping: "none",
+    target: {
+      rttMs: 0,
+      packetLossPercent: 0,
+      bandwidthMbps: null,
+    },
+  },
+  "wan-good": {
+    label: "Good WAN",
+    measuredDirectly: false,
+    shaping: "external",
+    target: {
+      rttMs: 50,
+      packetLossPercent: 0,
+      bandwidthMbps: 20,
+    },
+  },
+  "wan-rough": {
+    label: "Rough WAN",
+    measuredDirectly: false,
+    shaping: "external",
+    target: {
+      rttMs: 100,
+      packetLossPercent: 1,
+      bandwidthMbps: 8,
+    },
+  },
+};
+
+const networkProfile = parseNetworkProfile(networkProfileName);
+validateNetworkProfileTarget(networkProfile, targetUrl);
 
 const scenarioDefinitions = {
   "static-taps": {
@@ -147,6 +185,7 @@ const requestedScenarios = parseScenarioNames(process.env.SIMX_BENCH_SCENARIOS |
 async function main() {
   let browser = null;
   let leaseStarted = false;
+  const suiteStartedAt = new Date();
   try {
     sceneServer = await startSceneServer();
     let leaseInfo = null;
@@ -158,6 +197,12 @@ async function main() {
     }
 
     browser = await chromium.launch({ channel, headless });
+    const browserMetadata = {
+      name: "chromium",
+      channel,
+      headless,
+      version: browser.version(),
+    };
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
     const consoleIssues = [];
 
@@ -191,7 +236,16 @@ async function main() {
       );
     }
 
-    const report = buildSuiteReport(page.url(), renderedInitialFrame, scenarioReports);
+    const report = buildSuiteReport({
+      url: page.url(),
+      renderedInitialFrame,
+      scenarios: scenarioReports,
+      suiteStartedAt,
+      suiteFinishedAt: new Date(),
+      host: hostMetadata(),
+      browser: browserMetadata,
+      simulator: simulatorMetadata(leaseInfo),
+    });
     console.log(JSON.stringify(report, null, 2));
     if (!report.ok && process.env.SIMX_BENCH_STRICT === "1") {
       process.exitCode = 1;
@@ -279,31 +333,8 @@ async function setupScenario(scenario, leaseInfo) {
 }
 
 async function startLease() {
-  leaseProcess = spawn(
-    simxBin,
-    [
-      "lease",
-      "--slug",
-      leaseSlug,
-      "--ttl",
-      leaseTtl,
-      "--wait-timeout",
-      leaseWaitTimeout,
-      "--serve",
-      "--port",
-      String(leasePort),
-      "--fps",
-      String(leaseFps),
-      "--transport",
-      "h264",
-      "--control-mode",
-      controlMode,
-      "--idle-timeout",
-      leaseIdleTimeout,
-      "--json",
-    ],
-    { encoding: "utf8" }
-  );
+  const args = leaseArgs();
+  leaseProcess = spawn(simxBin, args, { encoding: "utf8" });
   let stdout = "";
   let stderr = "";
   let exitCode = null;
@@ -328,11 +359,43 @@ async function startLease() {
     const leaseInfo = parseFirstJsonObject(stdout);
     try {
       const response = await fetch(healthUrl);
-      if (response.ok && leaseInfo) return leaseInfo;
+      if (response.ok && leaseInfo) {
+        return {
+          ...leaseInfo,
+          command: commandString(simxBin, args),
+          args,
+        };
+      }
     } catch (_) {}
     await sleep(250);
   }
   throw new Error(`simx benchmark lease did not become ready: ${stderr || stdout}`);
+}
+
+function leaseArgs() {
+  return [
+    "lease",
+    "--slug",
+    leaseSlug,
+    "--ttl",
+    leaseTtl,
+    "--wait-timeout",
+    leaseWaitTimeout,
+    "--serve",
+    "--host",
+    leaseHost,
+    "--port",
+    String(leasePort),
+    "--fps",
+    String(leaseFps),
+    "--transport",
+    "h264",
+    "--control-mode",
+    controlMode,
+    "--idle-timeout",
+    leaseIdleTimeout,
+    "--json",
+  ];
 }
 
 function releaseLease() {
@@ -427,7 +490,16 @@ async function readStats(viewerUrl) {
   }
 }
 
-function buildSuiteReport(url, renderedInitialFrame, scenarios) {
+function buildSuiteReport({
+  url,
+  renderedInitialFrame,
+  scenarios,
+  suiteStartedAt,
+  suiteFinishedAt,
+  host,
+  browser,
+  simulator,
+}) {
   const checks = {
     renderedInitialFrame,
     scenariosPassed: scenarios.every((scenario) => scenario.ok),
@@ -439,7 +511,24 @@ function buildSuiteReport(url, renderedInitialFrame, scenarios) {
     ok: Object.values(checks).every(Boolean),
     transport: "h264-websocket-webcodecs",
     url,
+    timestamp: suiteStartedAt.toISOString(),
+    startedAt: suiteStartedAt.toISOString(),
+    finishedAt: suiteFinishedAt.toISOString(),
+    elapsedMs: suiteFinishedAt.getTime() - suiteStartedAt.getTime(),
+    environment: {
+      host,
+      browser,
+      simulator,
+      node: {
+        version: process.version,
+        platform: process.platform,
+        arch: process.arch,
+      },
+      simx: simxMetadata(),
+    },
+    network: networkProfile,
     scenarioNames: scenarios.map((scenario) => scenario.name),
+    scenarioCount: scenarios.length,
     durationMs: scenarioDurationMs,
     totalScenarioDurationMs: scenarioDurationMs * scenarios.length,
     sceneBaseUrl,
@@ -449,6 +538,20 @@ function buildSuiteReport(url, renderedInitialFrame, scenarios) {
       port: autoLease ? leasePort : null,
       fps: autoLease ? leaseFps : null,
       controlMode: autoLease ? controlMode : null,
+      ttl: autoLease ? leaseTtl : null,
+      idleTimeout: autoLease ? leaseIdleTimeout : null,
+      waitTimeout: autoLease ? leaseWaitTimeout : null,
+      startupTimeoutMs: autoLease ? leaseStartupTimeoutMs : null,
+      command: autoLease ? commandString(simxBin, leaseArgs()) : null,
+    },
+    benchmarkConfig: {
+      autoLease,
+      targetUrl,
+      sceneBaseUrl,
+      sceneSettleMs,
+      scenarioDurationMs,
+      requestedScenarios,
+      strict: process.env.SIMX_BENCH_STRICT === "1",
     },
     thresholds,
     checks,
@@ -463,6 +566,130 @@ function buildSuiteReport(url, renderedInitialFrame, scenarios) {
     report.scenarios = scenarios;
   }
   return report;
+}
+
+function parseNetworkProfile(name) {
+  const profile = networkProfiles[name];
+  if (!profile) {
+    const allowed = Object.keys(networkProfiles).join(", ");
+    throw new Error(`unknown network profile "${name}". Use one of: ${allowed}`);
+  }
+  return {
+    name,
+    ...profile,
+    shaper: process.env.SIMX_BENCH_NETWORK_SHAPER || null,
+    notes: process.env.SIMX_BENCH_NETWORK_NOTES || null,
+    observed: {
+      rttMs: numberEnv("SIMX_BENCH_OBSERVED_RTT_MS"),
+      packetLossPercent: numberEnv("SIMX_BENCH_OBSERVED_LOSS_PERCENT"),
+      downlinkMbps: numberEnv("SIMX_BENCH_OBSERVED_DOWNLINK_MBPS"),
+      uplinkMbps: numberEnv("SIMX_BENCH_OBSERVED_UPLINK_MBPS"),
+    },
+  };
+}
+
+function validateNetworkProfileTarget(profile, viewerUrl) {
+  if (profile.name === "local" || process.env.SIMX_BENCH_ALLOW_LOOPBACK_WAN === "1") {
+    return;
+  }
+  const url = new URL(viewerUrl);
+  if (!isLoopbackHost(url.hostname)) {
+    return;
+  }
+  throw new Error(
+    `network profile "${profile.name}" cannot measure loopback viewer URL ${viewerUrl}. ` +
+      "Set SIMX_VIEWER_URL to the shaped viewer URL, bind auto-lease with SIMX_BENCH_HOST when needed, " +
+      "or set SIMX_BENCH_ALLOW_LOOPBACK_WAN=1 to explicitly record a loopback WAN-profile dry run."
+  );
+}
+
+function isLoopbackHost(hostname) {
+  const normalized = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
+}
+
+function numberEnv(name) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return null;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) {
+    throw new Error(`${name} must be a finite number`);
+  }
+  return value;
+}
+
+function hostMetadata() {
+  return {
+    hostname: output("hostname"),
+    model: output("sysctl", ["-n", "hw.model"]),
+    cpu: output("sysctl", ["-n", "machdep.cpu.brand_string"]),
+    macOS: {
+      productName: output("sw_vers", ["-productName"]),
+      productVersion: output("sw_vers", ["-productVersion"]),
+      buildVersion: output("sw_vers", ["-buildVersion"]),
+    },
+    xcode: {
+      path: output("xcode-select", ["-p"]),
+      version: output("xcodebuild", ["-version"]),
+    },
+  };
+}
+
+function simxMetadata() {
+  return {
+    bin: simxBin,
+    version: output(simxBin, ["--version"]),
+  };
+}
+
+function simulatorMetadata(leaseInfo) {
+  if (!leaseInfo?.udid) return null;
+  const simctlInfo = simulatorInfo(leaseInfo.udid);
+  return {
+    udid: leaseInfo.udid,
+    slug: leaseInfo.slug || leaseSlug,
+    deviceName: leaseInfo.device_name || simctlInfo?.deviceName || null,
+    runtime: simctlInfo?.runtime || null,
+    state: simctlInfo?.state || null,
+    lease: leaseInfo,
+  };
+}
+
+function simulatorInfo(udid) {
+  const result = spawnSync("xcrun", ["simctl", "list", "devices", "--json"], {
+    encoding: "utf8",
+  });
+  if (result.status !== 0 || !result.stdout) return null;
+  try {
+    const parsed = JSON.parse(result.stdout);
+    for (const [runtime, devices] of Object.entries(parsed.devices || {})) {
+      const device = devices.find((candidate) => candidate.udid === udid);
+      if (device) {
+        return {
+          runtime,
+          deviceName: device.name || null,
+          state: device.state || null,
+        };
+      }
+    }
+  } catch (_) {}
+  return null;
+}
+
+function output(command, args = []) {
+  const result = spawnSync(command, args, { encoding: "utf8" });
+  if (result.status !== 0) return null;
+  const value = result.stdout.trim();
+  return value.length > 0 ? value : null;
+}
+
+function commandString(command, args) {
+  return [command, ...args].map(shellQuote).join(" ");
+}
+
+function shellQuote(value) {
+  if (/^[A-Za-z0-9_./:=@+-]+$/.test(value)) return value;
+  return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 function buildScenarioReport({
