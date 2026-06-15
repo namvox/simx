@@ -328,6 +328,7 @@ Notes:
   simx control swipe --slug browser --from-nx 0.5 --from-ny 0.8 --to-nx 0.5 --to-ny 0.2 --json
   simx control paste --slug browser --text \"hello\" --json
   simx control button --slug browser home --json
+  simx control button --slug browser soft-keyboard --json
 
 Notes:
   Control commands operate on an active lease by slug.
@@ -599,9 +600,10 @@ Notes:
         #[arg(long)]
         json: bool,
     },
-    /// Press a hardware button.
+    /// Press a hardware button or toggle the software keyboard.
     #[command(after_help = "Example:
-  simx control button --slug browser home --json")]
+  simx control button --slug browser home --json
+  simx control button --slug browser soft-keyboard --json")]
     Button {
         /// Active lease owner name to control.
         #[arg(long)]
@@ -654,12 +656,15 @@ impl TouchPhase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ControlButton {
     Home,
+    #[value(name = "soft-keyboard", alias = "softKeyboard")]
+    SoftKeyboard,
 }
 
 impl ControlButton {
     fn as_str(self) -> &'static str {
         match self {
             Self::Home => "home",
+            Self::SoftKeyboard => "softKeyboard",
         }
     }
 }

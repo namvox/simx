@@ -1,5 +1,9 @@
 use std::fs;
 use std::path::Path;
+#[cfg(target_os = "macos")]
+use std::path::PathBuf;
+#[cfg(target_os = "macos")]
+use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
@@ -68,6 +72,7 @@ pub trait HidTarget {
     fn send_touch(&self, nx: f64, ny: f64, down: bool) -> anyhow::Result<()>;
     fn send_key(&self, key_code: u16, down: bool) -> anyhow::Result<()>;
     fn press_home(&self) -> anyhow::Result<()>;
+    fn toggle_soft_keyboard(&self) -> anyhow::Result<()>;
 }
 
 pub fn capture_snapshot(
@@ -202,9 +207,12 @@ pub fn handle_hid_input(target: &impl HidTarget, text: &str) -> anyhow::Result<V
                 .unwrap_or("");
             send_text(target, text)
         }
-        Some("button") if value.get("button").and_then(|value| value.as_str()) == Some("home") => {
-            target.press_home()
-        }
+        Some("button") => match value.get("button").and_then(|value| value.as_str()) {
+            Some("home") => target.press_home(),
+            Some("softKeyboard") | Some("soft-keyboard") => target.toggle_soft_keyboard(),
+            Some(button) => bail!("unsupported button: {button}"),
+            None => Ok(()),
+        },
         _ => Ok(()),
     };
     result?;
@@ -687,12 +695,14 @@ fn jpeg_dimensions(bytes: &[u8]) -> anyhow::Result<(Option<u16>, Option<u16>)> {
 #[cfg(target_os = "macos")]
 struct NativeHidSession {
     handle: *mut c_void,
+    udid: String,
 }
 
 #[cfg(target_os = "macos")]
 impl NativeHidSession {
     fn start(udid: &str, wait_timeout: Duration) -> anyhow::Result<Self> {
         let developer_dir = CString::new(developer_dir()?)?;
+        let udid_string = udid.to_string();
         let udid = CString::new(udid)?;
         let mut error: *mut c_char = ptr::null_mut();
         let hid_timeout_ms = duration_millis_i32(wait_timeout);
@@ -715,7 +725,10 @@ impl NativeHidSession {
             let message = native_error_message(error, "native HID bridge failed");
             bail!("{message}");
         }
-        Ok(Self { handle })
+        Ok(Self {
+            handle,
+            udid: udid_string,
+        })
     }
 }
 
@@ -737,6 +750,10 @@ impl HidTarget for NativeHidSession {
         let mut error: *mut c_char = ptr::null_mut();
         let ok = unsafe { simx_hid_home(self.handle, &mut error) };
         native_bool_result(ok, error)
+    }
+
+    fn toggle_soft_keyboard(&self) -> anyhow::Result<()> {
+        toggle_simulator_soft_keyboard(&self.udid)
     }
 }
 
@@ -771,6 +788,10 @@ impl HidTarget for NativeHidSession {
     }
 
     fn press_home(&self) -> anyhow::Result<()> {
+        bail!("HID input requires macOS private Simulator APIs");
+    }
+
+    fn toggle_soft_keyboard(&self) -> anyhow::Result<()> {
         bail!("HID input requires macOS private Simulator APIs");
     }
 }
@@ -902,6 +923,93 @@ fn native_error_message(error: *mut c_char, fallback: &str) -> String {
 }
 
 #[cfg(target_os = "macos")]
+pub(crate) fn toggle_simulator_soft_keyboard(udid: &str) -> anyhow::Result<()> {
+    enable_simulator_hardware_keyboard(udid)?;
+    command_success(
+        Command::new("/usr/bin/open").args([
+            "-a",
+            "Simulator",
+            "--args",
+            "-CurrentDeviceUDID",
+            udid,
+        ]),
+        "failed to focus Simulator for soft keyboard toggle",
+    )?;
+    thread::sleep(Duration::from_millis(250));
+    let script = r#"
+tell application "Simulator" to activate
+delay 0.15
+tell application "System Events"
+  tell process "Simulator"
+    set frontmost to true
+    keystroke "k" using command down
+  end tell
+end tell
+"#;
+    command_success(
+        Command::new("/usr/bin/osascript").args(["-e", script]),
+        "failed to send Simulator soft keyboard hotkey",
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn toggle_simulator_soft_keyboard(udid: &str) -> anyhow::Result<()> {
+    let _ = udid;
+    bail!("soft keyboard toggle requires macOS Simulator");
+}
+
+#[cfg(target_os = "macos")]
+fn enable_simulator_hardware_keyboard(udid: &str) -> anyhow::Result<()> {
+    command_success(
+        Command::new("/usr/bin/defaults").args([
+            "write",
+            "com.apple.iphonesimulator",
+            "ConnectHardwareKeyboard",
+            "-bool",
+            "YES",
+        ]),
+        "failed to enable global Simulator hardware keyboard preference",
+    )?;
+    let prefs = simulator_preferences_path()?;
+    let key_path = format!(":DevicePreferences:{udid}:ConnectHardwareKeyboard");
+    let set_status = Command::new("/usr/libexec/PlistBuddy")
+        .args(["-c", &format!("Set {key_path} true")])
+        .arg(&prefs)
+        .status()
+        .context("failed to update Simulator per-device keyboard preference")?;
+    if set_status.success() {
+        return Ok(());
+    }
+    command_success(
+        Command::new("/usr/libexec/PlistBuddy")
+            .args(["-c", &format!("Add {key_path} bool true")])
+            .arg(&prefs),
+        "failed to add Simulator per-device hardware keyboard preference",
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn simulator_preferences_path() -> anyhow::Result<PathBuf> {
+    let home = std::env::var("HOME").context("HOME is not set")?;
+    Ok(PathBuf::from(home).join("Library/Preferences/com.apple.iphonesimulator.plist"))
+}
+
+#[cfg(target_os = "macos")]
+fn command_success(command: &mut Command, context: &str) -> anyhow::Result<()> {
+    let output = command.output().with_context(|| context.to_string())?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() { stderr } else { stdout };
+    if detail.is_empty() {
+        bail!("{context}");
+    }
+    bail!("{context}: {detail}");
+}
+
+#[cfg(target_os = "macos")]
 extern "C" {
     fn simx_frame_stream_start(
         developer_dir: *const c_char,
@@ -1000,6 +1108,10 @@ mod tests {
             fn press_home(&self) -> anyhow::Result<()> {
                 Ok(())
             }
+
+            fn toggle_soft_keyboard(&self) -> anyhow::Result<()> {
+                Ok(())
+            }
         }
 
         let error = handle_hid_input(
@@ -1008,6 +1120,53 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.to_string(), "unsupported KeyboardEvent.code: KeyFoo");
+    }
+
+    #[test]
+    fn soft_keyboard_button_dispatches_to_hid_target() {
+        struct RecordingTarget {
+            toggles: std::sync::Mutex<usize>,
+        }
+
+        impl HidTarget for RecordingTarget {
+            fn send_touch(&self, _nx: f64, _ny: f64, _down: bool) -> anyhow::Result<()> {
+                Ok(())
+            }
+
+            fn send_key(&self, key_code: u16, down: bool) -> anyhow::Result<()> {
+                let _ = (key_code, down);
+                Ok(())
+            }
+
+            fn press_home(&self) -> anyhow::Result<()> {
+                Ok(())
+            }
+
+            fn toggle_soft_keyboard(&self) -> anyhow::Result<()> {
+                *self.toggles.lock().unwrap() += 1;
+                Ok(())
+            }
+        }
+
+        let target = RecordingTarget {
+            toggles: std::sync::Mutex::new(0),
+        };
+        let acks = handle_hid_input(
+            &target,
+            r#"{"type":"button","id":"soft-keyboard","ack":true,"button":"softKeyboard"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(*target.toggles.lock().unwrap(), 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&acks[0]).unwrap(),
+            serde_json::json!({
+                "type": "ack",
+                "id": "soft-keyboard",
+                "ok": true,
+                "message": "ok"
+            })
+        );
     }
 
     #[cfg(target_os = "macos")]

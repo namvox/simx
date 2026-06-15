@@ -15,7 +15,7 @@ use base64::Engine;
 use serde::Serialize;
 use sha1::{Digest, Sha1};
 
-use crate::control::{handle_hid_input, HidTarget};
+use crate::control::{handle_hid_input, toggle_simulator_soft_keyboard, HidTarget};
 use crate::pool::PoolService;
 
 const VIEWER_HTML: &str = include_str!("../viewer/index.html");
@@ -1216,12 +1216,16 @@ struct EncodedFrameContext {
 struct NativeFrameSource {
     #[cfg(target_os = "macos")]
     handle: *mut c_void,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    udid: String,
     context: Arc<FrameContext>,
 }
 
 pub struct EncodedFrameSource {
     #[cfg(target_os = "macos")]
     handle: *mut c_void,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    udid: String,
     context: Arc<EncodedFrameContext>,
 }
 
@@ -1244,6 +1248,7 @@ impl NativeFrameSource {
         Self {
             #[cfg(target_os = "macos")]
             handle: ptr::null_mut(),
+            udid: "TEST-UDID".to_string(),
             context: Arc::new(FrameContext {
                 latest: Mutex::new(LatestFrame {
                     generation,
@@ -1296,7 +1301,11 @@ impl NativeFrameSource {
             };
             bail!("{message}");
         }
-        Ok(Self { handle, context })
+        Ok(Self {
+            handle,
+            udid: config.udid.clone(),
+            context,
+        })
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -1354,6 +1363,16 @@ impl NativeFrameSource {
     fn press_home(&self) -> anyhow::Result<()> {
         bail!("HID input requires macOS private Simulator APIs");
     }
+
+    #[cfg(target_os = "macos")]
+    fn toggle_soft_keyboard(&self) -> anyhow::Result<()> {
+        toggle_simulator_soft_keyboard(&self.udid)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn toggle_soft_keyboard(&self) -> anyhow::Result<()> {
+        bail!("HID input requires macOS private Simulator APIs");
+    }
 }
 
 impl HidTarget for NativeFrameSource {
@@ -1367,6 +1386,10 @@ impl HidTarget for NativeFrameSource {
 
     fn press_home(&self) -> anyhow::Result<()> {
         NativeFrameSource::press_home(self)
+    }
+
+    fn toggle_soft_keyboard(&self) -> anyhow::Result<()> {
+        NativeFrameSource::toggle_soft_keyboard(self)
     }
 }
 
@@ -1412,7 +1435,11 @@ impl EncodedFrameSource {
             };
             bail!("{message}");
         }
-        Ok(Self { handle, context })
+        Ok(Self {
+            handle,
+            udid: config.udid.clone(),
+            context,
+        })
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -1556,6 +1583,16 @@ impl EncodedFrameSource {
     fn press_home(&self) -> anyhow::Result<()> {
         bail!("HID input requires macOS private Simulator APIs");
     }
+
+    #[cfg(target_os = "macos")]
+    fn toggle_soft_keyboard(&self) -> anyhow::Result<()> {
+        toggle_simulator_soft_keyboard(&self.udid)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn toggle_soft_keyboard(&self) -> anyhow::Result<()> {
+        bail!("HID input requires macOS private Simulator APIs");
+    }
 }
 
 impl HidTarget for EncodedFrameSource {
@@ -1569,6 +1606,10 @@ impl HidTarget for EncodedFrameSource {
 
     fn press_home(&self) -> anyhow::Result<()> {
         EncodedFrameSource::press_home(self)
+    }
+
+    fn toggle_soft_keyboard(&self) -> anyhow::Result<()> {
+        EncodedFrameSource::toggle_soft_keyboard(self)
     }
 }
 
@@ -2316,6 +2357,7 @@ mod tests {
         let source = EncodedFrameSource {
             #[cfg(target_os = "macos")]
             handle: std::ptr::null_mut(),
+            udid: "TEST-UDID".to_string(),
             context: Arc::new(EncodedFrameContext {
                 latest: Mutex::new(LatestEncodedFrame {
                     generation: 3,
@@ -2372,6 +2414,7 @@ mod tests {
         let source = EncodedFrameSource {
             #[cfg(target_os = "macos")]
             handle: std::ptr::null_mut(),
+            udid: "TEST-UDID".to_string(),
             context: Arc::new(EncodedFrameContext {
                 latest: Mutex::new(LatestEncodedFrame {
                     generation: 20,
@@ -2414,6 +2457,7 @@ mod tests {
         let source = EncodedFrameSource {
             #[cfg(target_os = "macos")]
             handle: std::ptr::null_mut(),
+            udid: "TEST-UDID".to_string(),
             context: Arc::new(EncodedFrameContext {
                 latest: Mutex::new(LatestEncodedFrame {
                     generation: 11,

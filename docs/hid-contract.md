@@ -2,9 +2,9 @@
 
 This document describes the JSON text messages a browser client sends over the `simx` stream WebSocket to control the leased simulator.
 
-The core control families are stable: touch, keyboard, Home, and resume. On the
+The core control families are stable: touch, keyboard, buttons, and resume. On the
 wire these are represented as `type: "touch"`, `type: "key"`, `type: "button"`
-with `button: "home"`, and `type: "resume"`. Additive fields and new message
+with `button: "home"` or `button: "softKeyboard"`, and `type: "resume"`. Additive fields and new message
 types may be added in minor releases.
 
 ## Endpoint
@@ -168,7 +168,7 @@ Fields:
 - `code`: browser physical key code. This is the authoritative field used by the server.
 - `key`: browser character value. Currently accepted for compatibility and debugging; not used for mapping.
 - `repeat`: browser repeat flag. Currently accepted for compatibility; repeat behavior is not special-cased.
-- `modifiers`: current modifier state. Currently accepted for compatibility; modifier auto-chording is not implemented yet.
+- `modifiers`: current modifier state. When `phase` is `"down"`, selected modifiers are sent before the key. When `phase` is `"up"`, the key is released before selected modifiers.
 - `ack`: optional boolean. When `true`, the server replies with an acknowledgement.
 
 Supported `code` values:
@@ -237,7 +237,7 @@ Paste expands supported characters into key down/up events.
 
 Supported pasted characters currently include ASCII letters, digits, space, newline, and common punctuation: `- _ = + , < . > / ?`.
 
-## Hardware Buttons
+## Buttons
 
 Home button:
 
@@ -248,7 +248,18 @@ Home button:
 }
 ```
 
-Only `home` is currently supported. The native bridge tries the same SimulatorKit HID strategies used by the MindStone SimStream reference:
+Software keyboard toggle:
+
+```json
+{
+  "type": "button",
+  "button": "softKeyboard"
+}
+```
+
+`softKeyboard` toggles the simulator software keyboard by enabling the Simulator hardware keyboard preference for the leased device, focusing the matching Simulator window, and sending the host Simulator toggle shortcut. The kebab-case alias `soft-keyboard` is also accepted. Unlike touch, key, paste, and Home, this action depends on the macOS Simulator app being available as a foregroundable host process.
+
+For `home`, the native bridge tries the same SimulatorKit HID strategies used by the MindStone SimStream reference:
 
 - Consumer-control Menu usage.
 - Consumer-control Home usage.
