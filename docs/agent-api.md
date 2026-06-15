@@ -90,8 +90,8 @@ object:
 {
   "update": {
     "available": true,
-    "current_version": "0.2.0",
-    "latest_version": "0.2.1",
+    "current_version": "0.3.0",
+    "latest_version": "0.3.1",
     "command": "simx update"
   }
 }
@@ -295,7 +295,7 @@ Checks:
 ```sh
 simx update --check
 simx update
-simx update --version v0.2.0
+simx update --version v0.3.0
 simx update --install-dir ~/.local/bin
 simx update --json
 ```

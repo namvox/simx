@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.3.0 - 2026-06-15
 
 - Add `simx screenshot` and `simx record-video` for lease-scoped simulator
   media capture with JSON file metadata.

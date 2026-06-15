@@ -49,6 +49,7 @@ Open:
   ws://127.0.0.1:8080/browser/h264-stream  (experimental H.264/WebCodecs)
   http://127.0.0.1:8080/browser?transport=webrtc
   http://127.0.0.1:8080/browser/webrtc
+  POST http://127.0.0.1:8080/browser/webrtc-offer
   http://127.0.0.1:8080/browser/stats
 
 JPEG is the stable fallback. H.264/WebCodecs and WebRTC are experimental until WAN benchmark evidence is strong."
@@ -98,7 +99,8 @@ enum Command {
 Notes:
   Reusing a slug renews and reuses its active lease unless --new is set.
   With --serve, open http://<host>:<port>/<slug> in a browser.
-  JPEG is the stable fallback; --transport h264 and /<slug>/h264-stream are experimental.")]
+  JPEG is the stable fallback. H.264/WebCodecs and WebRTC are experimental.
+  WebRTC signaling uses POST http://<host>:<port>/<slug>/webrtc-offer.")]
     Lease {
         /// Stable lease owner name. Reusing the same slug renews/reuses the lease.
         #[arg(long)]
@@ -159,6 +161,7 @@ Viewer:
   ws://127.0.0.1:<port>/<slug>/h264-stream  (experimental H.264/WebCodecs)
   http://127.0.0.1:<port>/<slug>?transport=webrtc
   http://127.0.0.1:<port>/<slug>/webrtc     (WebRTC prototype descriptor)
+  POST http://127.0.0.1:<port>/<slug>/webrtc-offer
   http://127.0.0.1:<port>/<slug>/stats
 
 JPEG is the stable fallback. H.264/WebCodecs and WebRTC are experimental until WAN benchmark evidence is strong.")]
@@ -2354,6 +2357,7 @@ mod tests {
         assert!(root_help.contains("h264-stream  (experimental H.264/WebCodecs)"));
         assert!(root_help.contains("browser?transport=webrtc"));
         assert!(root_help.contains("browser/webrtc"));
+        assert!(root_help.contains("POST http://127.0.0.1:8080/browser/webrtc-offer"));
         assert!(root_help.contains("JPEG is the stable fallback"));
         assert!(root_help.contains("H.264/WebCodecs and WebRTC are experimental"));
 
@@ -2362,6 +2366,7 @@ mod tests {
             assert!(help.contains("--transport h264"));
             assert!(help.contains("--transport webrtc"));
             assert!(help.contains("jpeg is stable fallback, h264 is experimental"));
+            assert!(help.contains("webrtc-offer"));
             assert!(help.contains("JPEG is the stable fallback"));
         }
     }

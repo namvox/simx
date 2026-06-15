@@ -63,8 +63,8 @@ rg -n "token|secret|password|api[_-]?key|PRIVATE KEY|BEGIN .*KEY|ghp_|sk-"
 After the checklist passes:
 
 ```sh
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
 Pushing the tag runs `.github/workflows/release.yml`, which builds and uploads:
