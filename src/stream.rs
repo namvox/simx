@@ -15,7 +15,9 @@ use base64::Engine;
 use serde::Serialize;
 use sha1::{Digest, Sha1};
 
-use crate::control::{handle_hid_input, toggle_simulator_soft_keyboard, HidTarget};
+#[cfg(target_os = "macos")]
+use crate::control::toggle_simulator_soft_keyboard;
+use crate::control::{handle_hid_input, HidTarget};
 use crate::pool::PoolService;
 
 const VIEWER_HTML: &str = include_str!("../viewer/index.html");

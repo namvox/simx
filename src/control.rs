@@ -952,12 +952,6 @@ end tell
     )
 }
 
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn toggle_simulator_soft_keyboard(udid: &str) -> anyhow::Result<()> {
-    let _ = udid;
-    bail!("soft keyboard toggle requires macOS Simulator");
-}
-
 #[cfg(target_os = "macos")]
 fn enable_simulator_hardware_keyboard(udid: &str) -> anyhow::Result<()> {
     command_success(
@@ -971,27 +965,56 @@ fn enable_simulator_hardware_keyboard(udid: &str) -> anyhow::Result<()> {
         "failed to enable global Simulator hardware keyboard preference",
     )?;
     let prefs = simulator_preferences_path()?;
+    ensure_plist_dictionary(&prefs, ":DevicePreferences")?;
+    ensure_plist_dictionary(&prefs, &format!(":DevicePreferences:{udid}"))?;
     let key_path = format!(":DevicePreferences:{udid}:ConnectHardwareKeyboard");
-    let set_status = Command::new("/usr/libexec/PlistBuddy")
-        .args(["-c", &format!("Set {key_path} true")])
-        .arg(&prefs)
-        .status()
-        .context("failed to update Simulator per-device keyboard preference")?;
-    if set_status.success() {
-        return Ok(());
-    }
-    command_success(
-        Command::new("/usr/libexec/PlistBuddy")
-            .args(["-c", &format!("Add {key_path} bool true")])
-            .arg(&prefs),
-        "failed to add Simulator per-device hardware keyboard preference",
-    )
+    set_or_add_plist_bool(&prefs, &key_path, true)
+        .context("failed to set Simulator per-device hardware keyboard preference")
 }
 
 #[cfg(target_os = "macos")]
 fn simulator_preferences_path() -> anyhow::Result<PathBuf> {
     let home = std::env::var("HOME").context("HOME is not set")?;
     Ok(PathBuf::from(home).join("Library/Preferences/com.apple.iphonesimulator.plist"))
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_plist_dictionary(path: &Path, key_path: &str) -> anyhow::Result<()> {
+    if Command::new("/usr/libexec/PlistBuddy")
+        .args(["-c", &format!("Print {key_path}")])
+        .arg(path)
+        .status()
+        .context("failed to inspect Simulator preferences")?
+        .success()
+    {
+        return Ok(());
+    }
+    command_success(
+        Command::new("/usr/libexec/PlistBuddy")
+            .args(["-c", &format!("Add {key_path} dict")])
+            .arg(path),
+        "failed to create Simulator preference dictionary",
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn set_or_add_plist_bool(path: &Path, key_path: &str, value: bool) -> anyhow::Result<()> {
+    let value = if value { "true" } else { "false" };
+    if Command::new("/usr/libexec/PlistBuddy")
+        .args(["-c", &format!("Set {key_path} {value}")])
+        .arg(path)
+        .status()
+        .context("failed to update Simulator preference")?
+        .success()
+    {
+        return Ok(());
+    }
+    command_success(
+        Command::new("/usr/libexec/PlistBuddy")
+            .args(["-c", &format!("Add {key_path} bool {value}")])
+            .arg(path),
+        "failed to add Simulator preference",
+    )
 }
 
 #[cfg(target_os = "macos")]
