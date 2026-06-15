@@ -1,6 +1,6 @@
 # API And CLI Stability
 
-This document defines the public `simx` contract for `v0.2.0`.
+This document defines the public `simx` contract for `v0.3.0`.
 
 `simx` follows semantic versioning:
 
@@ -13,7 +13,7 @@ minor release when practical.
 
 ## Stable Commands
 
-The following commands are stable in `v0.2.0`:
+The following commands are stable in `v0.3.0`:
 
 ```sh
 simx init
@@ -51,13 +51,13 @@ source changes by default. Hot reload rebuilds a preview dylib, copies it into
 the running host app's data container, and notifies the host process without
 relaunching it.
 
-This command is not a stable contract in `v0.2.0`. Supported package shapes,
+This command is not a stable contract in `v0.3.0`. Supported package shapes,
 generated host internals, JSON fields, watch behavior, and reload diagnostics
 may change in minor releases while the workflow is validated.
 
 ## Stable Agent JSON
 
-The following machine-readable outputs are stable in `v0.2.0`:
+The following machine-readable outputs are stable in `v0.3.0`:
 
 ```sh
 simx status --json
@@ -92,8 +92,8 @@ additive `update` object:
 {
   "update": {
     "available": true,
-    "current_version": "0.2.0",
-    "latest_version": "0.2.1",
+    "current_version": "0.3.0",
+    "latest_version": "0.3.1",
     "command": "simx update"
   }
 }
@@ -125,7 +125,7 @@ lease --wait-timeout: 60s
 renew --ttl: 30m
 ```
 
-There is no maximum TTL in `v0.2.0`.
+There is no maximum TTL in `v0.3.0`.
 
 ## Streaming Contract
 
@@ -290,5 +290,5 @@ Additive fields and new message types may be added in minor releases. See
 
 - Long-press scroll: `type: "longPressScroll"`.
 
-`v0.2.0` adds additive CLI control commands for snapshots and native HID
-actions. These commands do not change the WebSocket HID message core.
+`v0.2.0` added additive CLI control commands for snapshots and native HID
+actions. These commands did not change the WebSocket HID message core.
