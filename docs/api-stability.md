@@ -238,6 +238,7 @@ simx control drag --slug <slug> --from-nx <0..1> --from-ny <0..1> --to-nx <0..1>
 simx control key --slug <slug> --code <KeyboardEvent.code> --json
 simx control paste --slug <slug> --text <text> --json
 simx control button --slug <slug> home --json
+simx control button --slug <slug> soft-keyboard --json
 ```
 
 These commands operate on the active lease directly through a short-lived native
@@ -279,7 +280,7 @@ The core HID/control message families from `v0.1.0` remain stable:
 
 - Touch: `type: "touch"`.
 - Keyboard: `type: "key"`.
-- Home: `type: "button"` with `button: "home"`.
+- Buttons: `type: "button"` with `button: "home"` or `button: "softKeyboard"`.
 - Resume: `type: "resume"`.
 
 Additive fields and new message types may be added in minor releases. See

@@ -186,6 +186,7 @@ simx control drag --slug agent-a --from-nx 0.2 --from-ny 0.2 --to-nx 0.8 --to-ny
 simx control key --slug agent-a --code KeyA --json
 simx control paste --slug agent-a --text "hello" --json
 simx control button --slug agent-a home --json
+simx control button --slug agent-a soft-keyboard --json
 ```
 
 WebSocket control modes do not restrict `simx control`. They only decide which

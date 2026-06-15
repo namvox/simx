@@ -4,6 +4,9 @@
 
 - Add `simx screenshot` and `simx record-video` for lease-scoped simulator
   media capture with JSON file metadata.
+- Add support for toggling the simulator software keyboard through
+  `button: "softKeyboard"` and `simx control button ... soft-keyboard`,
+  using the host Simulator hardware-keyboard preference and toggle shortcut.
 - Add experimental `simx preview` for Swift Package-backed SwiftUI previews with
   host-app hot reload on an active leased simulator.
 - Add H.264 stress-scene benchmark runner coverage for simulator-visible
