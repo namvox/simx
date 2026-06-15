@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add experimental WebRTC loopback video: valid browser offers now receive an SDP
+  answer and simulator H.264 video is rendered through a WebRTC media track,
+  while HID/control remains on the existing WebSocket path.
+
 ## v0.3.0 - 2026-06-15
 
 - Add `simx screenshot` and `simx record-video` for lease-scoped simulator

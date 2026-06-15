@@ -5,22 +5,24 @@ in [api-stability.md](api-stability.md).
 
 ## Prototype WebRTC Signaling And Media Delivery
 
-Status: prototype signaling slice in place; media delivery is incomplete.
+Status: local loopback-video milestone implemented; production readiness is incomplete.
 
 The current prototype adds:
 
 - `GET /<slug>?transport=webrtc` for the browser prototype viewer.
 - `GET /<slug>/webrtc` for a JSON descriptor of the experimental surface.
-- `POST /<slug>/webrtc-offer` for validating browser SDP offers.
+- `POST /<slug>/webrtc-offer` for validating browser SDP offers and returning
+  an SDP answer.
 - `--transport webrtc` as an experimental serve/lease transport selector.
 
 The prototype intentionally keeps HID/control on the existing WebSocket path.
 It does not move touch, keyboard, Home, resume, or control-claim semantics to a
 WebRTC data channel.
 
-Valid WebRTC offers currently receive a structured `501 Not Implemented`
-response because Rust-side SDP answer generation, ICE/DTLS/SRTP ownership, H.264
-RTP packetization, RTCP feedback, and congestion control are not implemented.
+Valid WebRTC offers receive a `200 OK` response with an SDP answer. The viewer
+keeps HID/control on the existing WebSocket path while simulator video is sent
+as H.264 over a WebRTC media track. Trickle ICE, TURN, full RTCP feedback,
+bitrate adaptation, WAN evidence, and production readiness are still incomplete.
 The intended media path is documented in
 [streaming-video-technical-solution.md](streaming-video-technical-solution.md).
 

@@ -411,20 +411,36 @@
         const descriptorResponse = await fetch(`/${encodeURIComponent(slug)}/webrtc`);
         prototypeState.descriptor = await descriptorResponse.json();
         const peer = new RTCPeerConnection();
+        prototypeState.peer = peer;
         peer.addTransceiver("video", { direction: "recvonly" });
+        peer.onconnectionstatechange = () => {
+          prototypeState.connectionState = peer.connectionState;
+          if (peer.connectionState === "connected") setStatus("Live WebRTC");
+          if (peer.connectionState === "failed") setStatus("WebRTC failed");
+        };
+        peer.oniceconnectionstatechange = () => {
+          prototypeState.iceConnectionState = peer.iceConnectionState;
+        };
         peer.ontrack = (event) => {
-          rtcVideoEl.srcObject = event.streams[0];
-          setStatus("Live WebRTC");
+          const stream = event.streams[0] || new MediaStream([event.track]);
+          rtcVideoEl.srcObject = stream;
+          prototypeState.track = {
+            kind: event.track.kind,
+            id: event.track.id,
+            readyState: event.track.readyState
+          };
+          setStatus("WebRTC media track");
         };
         const offer = await peer.createOffer();
         await peer.setLocalDescription(offer);
+        await waitForIceGathering(peer);
         const capabilities = window.RTCRtpReceiver?.getCapabilities?.("video") || null;
         const response = await fetch(`/${encodeURIComponent(slug)}/webrtc-offer`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            type: offer.type,
-            sdp: offer.sdp,
+            type: peer.localDescription.type,
+            sdp: peer.localDescription.sdp,
             hid: "websocket",
             capabilities
           })
@@ -441,6 +457,21 @@
         setStatus("WebRTC prototype error");
         console.error(error);
       }
+    }
+    function waitForIceGathering(peer) {
+      if (peer.iceGatheringState === "complete") return Promise.resolve();
+      return new Promise((resolve) => {
+        const timeout = setTimeout(done, 3000);
+        function done() {
+          clearTimeout(timeout);
+          peer.removeEventListener("icegatheringstatechange", onState);
+          resolve();
+        }
+        function onState() {
+          if (peer.iceGatheringState === "complete") done();
+        }
+        peer.addEventListener("icegatheringstatechange", onState);
+      });
     }
     if (transport === "h264") {
       frameEl.hidden = true;

@@ -336,8 +336,8 @@ This is a local-loopback tuning profile, not a production transport guarantee.
 
 ### WebRTC Prototype
 
-The WebRTC prototype validates browser signaling without replacing the stable
-media or HID paths yet:
+The WebRTC prototype validates a local loopback video path without replacing the
+stable media or HID paths yet:
 
 ```sh
 simx lease --slug browser-preview --ttl 10m --serve --port 8080 --transport webrtc
@@ -352,10 +352,11 @@ POST http://127.0.0.1:8080/browser-preview/webrtc-offer
 ```
 
 The WebRTC viewer creates an SDP offer and posts it to the signaling endpoint.
-For now, valid offers receive a structured `501 Not Implemented` response
-because SDP answers, ICE/DTLS/SRTP ownership, H.264 RTP packetization, and RTCP
-feedback are not implemented. HID/control remains on the existing WebSocket
-stream contract while video transport is evaluated.
+Valid offers receive an SDP answer, and simulator video is sent over a WebRTC
+video track. HID/control remains on the existing WebSocket stream contract while
+video transport is evaluated. The route remains experimental: WAN behavior,
+TURN, full RTCP feedback, bitrate adaptation, and production readiness are not
+yet proven.
 
 ## JSON Output For Agents
 

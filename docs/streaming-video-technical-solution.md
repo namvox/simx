@@ -127,14 +127,14 @@ A staged implementation is now partially in place:
 3. Add a local encoded-frame transport for development validation. An
    experimental `/<slug>/h264-stream` WebSocket route and `?transport=h264`
    WebCodecs viewer mode are in place.
-4. Add WebRTC signaling and media delivery. A prototype signaling surface and
-   `--transport webrtc` selector are in place; WebRTC media delivery is still
-   incomplete.
+4. Add WebRTC signaling and media delivery. An experimental local loopback-video
+   path is in place through `--transport webrtc`, but WAN behavior and
+   production readiness are incomplete.
 5. Keep the existing WebSocket HID channel, or move control messages onto a
    WebRTC data channel after the video path is stable.
 
 The intermediate WebCodecs transport remains useful for encoder validation while
-WebRTC media delivery is unfinished:
+WebRTC media delivery remains experimental:
 
 ```text
 VideoToolbox H.264
@@ -185,10 +185,12 @@ and posts it to `POST /<slug>/webrtc-offer`. The server validates that the
 payload is an offer, that the SDP includes a video m-line, and that HID remains
 on the existing WebSocket path with `hid: "websocket"`.
 
-The current prototype intentionally returns `501 Not Implemented` for valid
-offers. That response is part of the prototype contract: it proves the signaling
-shape and records the media work that must be finished before WebRTC can carry
-simulator video.
+Valid offers return `200 OK` with an SDP answer for a local loopback-video
+milestone. The server creates a WebRTC peer connection, sends existing
+VideoToolbox H.264 access units through a WebRTC video track, and keeps
+HID/control on the existing WebSocket path. The route remains experimental:
+trickle ICE, TURN, full RTCP feedback, bitrate adaptation, WAN-shaped evidence,
+and production readiness are still incomplete.
 
 The intended media mapping is:
 
@@ -199,13 +201,13 @@ EncodedFrameSource::start_h264
 -> browser <video> track
 ```
 
-The RTP sender should negotiate H.264 in SDP, use RFC 6184
-`packetization-mode=1`, map each access unit to a 90 kHz RTP timestamp derived
-from `pts_ms`, fragment large NAL units with FU-A, and make SPS/PPS available
-for decoder recovery around IDR frames. RTCP PLI/FIR feedback should call the
-existing keyframe request path. Transport feedback, NACK, bitrate adaptation,
-and stale-frame dropping should replace the current WebSocket-specific delivery
-heuristics before the route can be considered production-ready.
+The RTP sender negotiates H.264 in SDP, uses RFC 6184 `packetization-mode=1`,
+converts VideoToolbox AVCC access units into Annex-B samples, fragments large
+NAL units with FU-A through the WebRTC packetizer, and prepends SPS/PPS around
+IDR frames for decoder recovery. RTCP feedback currently requests keyframes in
+the native encoder. Transport feedback, NACK-specific handling, bitrate
+adaptation, and stale-frame dropping should replace the current fixed-cadence
+delivery loop before the route can be considered production-ready.
 
 HID/control stays on `WS /<slug>/stream` for this stage so media transport risk
 does not change touch, keyboard, Home, resume, or control-claim semantics.
@@ -270,10 +272,10 @@ simx serve --slug browser --port 8080 --transport webrtc
 
 `--transport jpeg` is the stable compatibility path. `--transport h264` is an
 experimental VideoToolbox/WebCodecs path pending WAN benchmark evidence.
-`--transport webrtc` exposes the prototype WebRTC viewer/signaling surface, but
-does not yet deliver simulator video over WebRTC. Any stable CLI, JSON,
-WebSocket, WebRTC, or HID contract changes must update the relevant docs and
-reference `docs/api-stability.md`.
+`--transport webrtc` exposes the prototype WebRTC viewer/signaling surface and
+delivers local loopback simulator video over a WebRTC media track. Any stable
+CLI, JSON, WebSocket, WebRTC, or HID contract changes must update the relevant
+docs and reference `docs/api-stability.md`.
 
 ## Benchmarking
 
