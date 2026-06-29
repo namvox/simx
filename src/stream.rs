@@ -205,6 +205,8 @@ pub struct StreamStats {
     #[serde(skip_serializing)]
     last_sent_at: Option<Instant>,
     #[serde(skip_serializing)]
+    last_activity_at: Option<Instant>,
+    #[serde(skip_serializing)]
     source_samples: VecDeque<Instant>,
     #[serde(skip_serializing)]
     sent_samples: VecDeque<Instant>,
@@ -600,6 +602,7 @@ async fn send_webrtc_h264_samples(
     let frame_interval = Duration::from_secs_f64(1.0 / config.fps.max(1) as f64);
     let mut last_sent_generation = 0_u64;
     let mut last_lease_check = Instant::now();
+    record_stream_activity(&config);
     if let Err(error) = encoded_source.request_keyframe() {
         eprintln!("webrtc keyframe request error: {error:#}");
     }
@@ -613,6 +616,10 @@ async fn send_webrtc_h264_samples(
                 break;
             }
             last_lease_check = Instant::now();
+        }
+        if webrtc_media_paused_after_idle_timeout(&config, Instant::now()) {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            continue;
         }
         if let Some(frame) = encoded_source.latest_frame_after(last_sent_generation) {
             if !frame.keyframe && frame.received_at.elapsed() > MAX_H264_DELIVERY_AGE {
@@ -798,6 +805,7 @@ fn stream_frames(
         stats.connected_clients = stats.connected_clients.saturating_add(1);
         stats.target_fps = config.fps;
         stats.paused = false;
+        stats.last_activity_at = Some(last_activity);
         stats.controller_connected = match config.control_mode {
             StreamControlMode::ReadOnly => false,
             StreamControlMode::SingleController => stats.controller_connected || is_controller,
@@ -831,14 +839,13 @@ fn stream_frames(
                     if is_resume_message(&text) {
                         paused = false;
                         next_frame_at = Instant::now();
-                        last_activity = Instant::now();
-                        update_stats(&config, |stats| stats.paused = false);
+                        last_activity = record_stream_activity(&config);
                         write_ws_text(&mut stream, r#"{"type":"resumed"}"#)?;
                     } else if is_claim_control_message(&text)
                         && config.control_mode == StreamControlMode::Claim
                     {
                         claim_controller(&config, client_id);
-                        last_activity = Instant::now();
+                        last_activity = record_stream_activity(&config);
                         write_client_message(&mut stream, &config, "controller", None)?;
                         if let Some(ack) = input_ack(&text, true, "ok") {
                             write_ws_text(&mut stream, &ack)?;
@@ -847,7 +854,7 @@ fn stream_frames(
                         .control_mode
                         .can_send_input(&config, client_id, is_controller)
                     {
-                        last_activity = Instant::now();
+                        last_activity = record_stream_activity(&config);
                         match handle_hid_input(frame_source.as_ref(), &text) {
                             Ok(acks) => {
                                 for ack in acks {
@@ -984,6 +991,7 @@ fn stream_h264_frames(
         stats.connected_clients = stats.connected_clients.saturating_add(1);
         stats.target_fps = config.fps;
         stats.paused = false;
+        stats.last_activity_at = Some(last_activity);
         stats.controller_connected = match config.control_mode {
             StreamControlMode::ReadOnly => false,
             StreamControlMode::SingleController => stats.controller_connected || is_controller,
@@ -1020,8 +1028,7 @@ fn stream_h264_frames(
                     if is_resume_message(&text) {
                         paused = false;
                         next_frame_at = Instant::now();
-                        last_activity = Instant::now();
-                        update_stats(&config, |stats| stats.paused = false);
+                        last_activity = record_stream_activity(&config);
                         if let Err(error) = encoded_source.request_keyframe() {
                             eprintln!("keyframe request error: {error:#}");
                         }
@@ -1057,7 +1064,7 @@ fn stream_h264_frames(
                         && config.control_mode == StreamControlMode::Claim
                     {
                         claim_controller(&config, client_id);
-                        last_activity = Instant::now();
+                        last_activity = record_stream_activity(&config);
                         write_client_message(&mut stream, &config, "controller", Some("h264"))?;
                         if let Some(ack) = input_ack(&text, true, "ok") {
                             write_ws_text(&mut stream, &ack)?;
@@ -1066,7 +1073,7 @@ fn stream_h264_frames(
                         .control_mode
                         .can_send_input(&config, client_id, is_controller)
                     {
-                        last_activity = Instant::now();
+                        last_activity = record_stream_activity(&config);
                         match handle_hid_input(encoded_source.as_ref(), &text) {
                             Ok(acks) => {
                                 for ack in acks {
@@ -1369,6 +1376,29 @@ fn update_stats(config: &ServeConfig, update: impl FnOnce(&mut StreamStats)) {
         }
         update(&mut stats);
     }
+}
+
+fn record_stream_activity(config: &ServeConfig) -> Instant {
+    let now = Instant::now();
+    update_stats(config, |stats| {
+        stats.paused = false;
+        stats.last_activity_at = Some(now);
+    });
+    now
+}
+
+fn webrtc_media_paused_after_idle_timeout(config: &ServeConfig, now: Instant) -> bool {
+    let Ok(mut stats) = config.stats.lock() else {
+        return false;
+    };
+    if stats.started_at.is_none() {
+        stats.started_at = Some(now);
+    }
+    let last_activity_at = *stats.last_activity_at.get_or_insert(now);
+    if !stats.paused && now.duration_since(last_activity_at) >= config.idle_timeout {
+        stats.paused = true;
+    }
+    stats.paused
 }
 
 fn push_sample(samples: &mut VecDeque<Instant>, now: Instant, window: Duration) {
@@ -2409,10 +2439,11 @@ mod tests {
         acquire_controller, claim_controller, h264_codec_string, h264_sample_annex_b,
         h264_stream_path, input_ack, is_claim_control_message, is_keyframe_request_message,
         is_resume_message, is_unacknowledged_touch_move, lease_is_active, parse_next_ws_event,
-        slug_path, slug_path_slash, stats_path, stream_path, validate_webrtc_offer,
-        webrtc_descriptor_path, webrtc_offer_path, websocket_accept, EncodedFrame,
-        EncodedFrameContext, EncodedFrameSource, LatestEncodedFrame, NativeFrameSource,
-        ServeConfig, StreamControlMode, StreamStats, StreamTransport, WsEvent,
+        record_stream_activity, slug_path, slug_path_slash, stats_path, stream_path,
+        validate_webrtc_offer, webrtc_descriptor_path, webrtc_media_paused_after_idle_timeout,
+        webrtc_offer_path, websocket_accept, EncodedFrame, EncodedFrameContext, EncodedFrameSource,
+        LatestEncodedFrame, NativeFrameSource, ServeConfig, StreamControlMode, StreamStats,
+        StreamTransport, WsEvent,
     };
     use tempfile::TempDir;
 
@@ -2525,6 +2556,29 @@ mod tests {
         .unwrap_err();
 
         assert!(error.contains("video"));
+    }
+
+    #[test]
+    fn webrtc_media_pauses_after_shared_idle_timeout_and_resumes_on_activity() {
+        let mut config = test_serve_config(StreamControlMode::Shared);
+        config.idle_timeout = Duration::from_millis(100);
+
+        let activity_at = record_stream_activity(&config);
+
+        assert!(!webrtc_media_paused_after_idle_timeout(
+            &config,
+            activity_at + Duration::from_millis(99)
+        ));
+        assert!(webrtc_media_paused_after_idle_timeout(
+            &config,
+            activity_at + Duration::from_millis(100)
+        ));
+        assert!(config.stats.lock().unwrap().paused);
+
+        let resumed_at = record_stream_activity(&config);
+
+        assert!(!webrtc_media_paused_after_idle_timeout(&config, resumed_at));
+        assert!(!config.stats.lock().unwrap().paused);
     }
 
     #[test]
