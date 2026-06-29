@@ -67,7 +67,7 @@ POST http://127.0.0.1:8080/browser/webrtc-offer
 - Streams default to `--control-mode read-only`, where browser clients can view frames but cannot send HID input.
 - Writable browser modes are `--control-mode single-controller`, `--control-mode claim`, and `--control-mode shared`.
 - H.264 is experimental: use `--transport h264`, `GET /<slug>?transport=h264`, and `WS /<slug>/h264-stream`.
-- WebRTC is a prototype surface: use `--transport webrtc`, `GET /<slug>?transport=webrtc`, `GET /<slug>/webrtc`, and `POST /<slug>/webrtc-offer`; signaling validation exists, but media delivery is incomplete.
+- WebRTC is an experimental loopback-video surface: use `--transport webrtc`, `GET /<slug>?transport=webrtc`, `GET /<slug>/webrtc`, and `POST /<slug>/webrtc-offer`; valid offers return an SDP answer and video uses a WebRTC media track, but WAN behavior and production readiness are incomplete.
 - `simx install --slug ... --app ...` installs a `.app` bundle on the active lease, infers `CFBundleIdentifier` from `Info.plist`, and launches it by default.
 - `simx run --slug ...` validates the current folder has one `.xcodeproj`, builds it quietly for the active lease, writes the build log under `.simx/logs/`, installs the built `.app`, infers `CFBundleIdentifier` from `Info.plist`, writes `.simx/run.json`, and launches it by default.
 - Do not reintroduce `simctl io screenshot` polling for streaming.

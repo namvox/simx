@@ -6,14 +6,25 @@ use std::net::{TcpListener, TcpStream};
 #[cfg(target_os = "macos")]
 use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context};
 use base64::Engine;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
+use webrtc::api::interceptor_registry::register_default_interceptors;
+use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_H264};
+use webrtc::api::APIBuilder;
+use webrtc::media::Sample;
+use webrtc::peer_connection::configuration::RTCConfiguration;
+use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
+use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
+use webrtc::track::track_local::TrackLocal;
 
 #[cfg(target_os = "macos")]
 use crate::control::toggle_simulator_soft_keyboard;
@@ -150,6 +161,14 @@ struct WebrtcOfferSummary {
     advertises_h264: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct WebrtcOfferRequest {
+    #[serde(rename = "type")]
+    kind: String,
+    sdp: String,
+    hid: Option<String>,
+}
+
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct StreamStats {
     pub target_fps: u32,
@@ -176,12 +195,17 @@ pub struct StreamStats {
     pub last_delivery_latency_ms: Option<u128>,
     pub paused: bool,
     pub controller_connected: bool,
+    pub webrtc_connection_state: Option<String>,
+    pub webrtc_frames: u64,
+    pub webrtc_bytes: u64,
     #[serde(skip_serializing)]
     started_at: Option<Instant>,
     #[serde(skip_serializing)]
     last_source_at: Option<Instant>,
     #[serde(skip_serializing)]
     last_sent_at: Option<Instant>,
+    #[serde(skip_serializing)]
+    last_activity_at: Option<Instant>,
     #[serde(skip_serializing)]
     source_samples: VecDeque<Instant>,
     #[serde(skip_serializing)]
@@ -287,7 +311,8 @@ fn handle_connection(
         return Ok(());
     }
     if request_method(&request) == Some("POST") && path == webrtc_offer_path(&config.slug) {
-        return handle_webrtc_offer(&mut stream, &config, &request);
+        let encoded_source = h264_source_for(&config, &h264_source)?;
+        return handle_webrtc_offer(&mut stream, &config, encoded_source, &request);
     }
 
     match path {
@@ -349,7 +374,7 @@ fn webrtc_offer_path(slug: &str) -> String {
 
 fn webrtc_prototype_info(config: &ServeConfig) -> WebrtcPrototypeInfo<'_> {
     WebrtcPrototypeInfo {
-        status: "experimental",
+        status: "experimental-loopback-video",
         slug: &config.slug,
         transport: "webrtc",
         viewer: format!(
@@ -368,10 +393,10 @@ fn webrtc_prototype_info(config: &ServeConfig) -> WebrtcPrototypeInfo<'_> {
             clock_rate_hz: 90_000,
         },
         incomplete: vec![
-            "SDP answer generation",
-            "ICE/DTLS/SRTP session ownership",
-            "H.264 RTP packetization and RTCP feedback",
-            "Congestion control and production readiness checks",
+            "Trickle ICE and TURN configuration",
+            "Full RTCP feedback handling and bitrate adaptation",
+            "WAN-shaped benchmark evidence",
+            "Production readiness checks",
         ],
         api_stability: "Experimental; see docs/api-stability.md",
     }
@@ -380,40 +405,28 @@ fn webrtc_prototype_info(config: &ServeConfig) -> WebrtcPrototypeInfo<'_> {
 fn handle_webrtc_offer(
     stream: &mut TcpStream,
     config: &ServeConfig,
+    encoded_source: Arc<EncodedFrameSource>,
     request: &str,
 ) -> anyhow::Result<()> {
     match validate_webrtc_offer(http_body(request)) {
         Ok(summary) => {
-            let body = serde_json::json!({
-                "type": "webrtcPrototype",
-                "status": "media-not-implemented",
-                "slug": config.slug,
-                "transport": "webrtc",
-                "offer": {
-                    "sdpBytes": summary.sdp_bytes,
-                    "hasVideoMLine": summary.has_video_mline,
-                    "advertisesH264": summary.advertises_h264
-                },
-                "hid": {
-                    "mode": "websocket",
-                    "websocket": stream_path(&config.slug)
-                },
-                "media": {
-                    "codec": "H.264/AVC",
-                    "source": "EncodedFrameSource::start_h264",
-                    "rtpPacketization": "RFC 6184 packetization-mode=1",
-                    "clockRateHz": 90000
-                },
-                "next": [
-                    "Create a WebRTC peer connection on the Rust side",
-                    "Packetize existing VideoToolbox H.264 access units into RTP",
-                    "Map RTCP PLI/FIR feedback to requestKeyframe",
-                    "Keep HID/control on the existing WebSocket path while media transport is evaluated"
-                ],
-                "error": "WebRTC signaling is validated, but SDP answer generation and media delivery are not implemented in this prototype."
-            });
-            let body = serde_json::to_vec(&body)?;
-            write_http_response(stream, "501 Not Implemented", "application/json", &body)
+            match start_webrtc_session(config.clone(), encoded_source, http_body(request), summary)
+            {
+                Ok(body) => write_http_response(stream, "200 OK", "application/json", &body),
+                Err(error) => {
+                    let body = serde_json::to_vec(&serde_json::json!({
+                        "type": "webrtcPrototypeError",
+                        "status": "answer-failed",
+                        "error": error.to_string()
+                    }))?;
+                    write_http_response(
+                        stream,
+                        "500 Internal Server Error",
+                        "application/json",
+                        &body,
+                    )
+                }
+            }
         }
         Err(message) => {
             let body = serde_json::to_vec(&serde_json::json!({
@@ -427,20 +440,17 @@ fn handle_webrtc_offer(
 }
 
 fn validate_webrtc_offer(body: &str) -> Result<WebrtcOfferSummary, String> {
-    let value: serde_json::Value =
+    let offer: WebrtcOfferRequest =
         serde_json::from_str(body).map_err(|error| format!("invalid JSON offer: {error}"))?;
-    if value.get("type").and_then(|value| value.as_str()) != Some("offer") {
+    if offer.kind != "offer" {
         return Err("offer type must be \"offer\"".to_string());
     }
-    if let Some(hid) = value.get("hid").and_then(|value| value.as_str()) {
+    if let Some(hid) = offer.hid.as_deref() {
         if hid != "websocket" {
             return Err("WebRTC prototype keeps HID on the existing WebSocket path".to_string());
         }
     }
-    let sdp = value
-        .get("sdp")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| "offer sdp must be a string".to_string())?;
+    let sdp = offer.sdp;
     if sdp.trim().is_empty() {
         return Err("offer sdp must not be empty".to_string());
     }
@@ -453,6 +463,291 @@ fn validate_webrtc_offer(body: &str) -> Result<WebrtcOfferSummary, String> {
         has_video_mline,
         advertises_h264: sdp.to_ascii_uppercase().contains("H264"),
     })
+}
+
+fn start_webrtc_session(
+    config: ServeConfig,
+    encoded_source: Arc<EncodedFrameSource>,
+    request_body: &str,
+    summary: WebrtcOfferSummary,
+) -> anyhow::Result<Vec<u8>> {
+    let offer: WebrtcOfferRequest =
+        serde_json::from_str(request_body).context("invalid WebRTC offer JSON")?;
+    let (answer_tx, answer_rx) = mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name(format!("simx-webrtc-{}", config.slug))
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = answer_tx.send(Err(anyhow::anyhow!(error)));
+                    return;
+                }
+            };
+            if let Err(error) = runtime.block_on(run_webrtc_session(
+                config,
+                encoded_source,
+                offer,
+                summary,
+                answer_tx,
+            )) {
+                eprintln!("webrtc session error: {error:#}");
+            }
+        })
+        .context("failed to spawn WebRTC session thread")?;
+    answer_rx
+        .recv_timeout(Duration::from_secs(10))
+        .context("timed out waiting for WebRTC answer")?
+}
+
+async fn run_webrtc_session(
+    config: ServeConfig,
+    encoded_source: Arc<EncodedFrameSource>,
+    offer: WebrtcOfferRequest,
+    summary: WebrtcOfferSummary,
+    answer_tx: mpsc::SyncSender<anyhow::Result<Vec<u8>>>,
+) -> anyhow::Result<()> {
+    let mut media_engine = MediaEngine::default();
+    media_engine.register_default_codecs()?;
+    let mut registry = webrtc::interceptor::registry::Registry::new();
+    registry = register_default_interceptors(registry, &mut media_engine)?;
+    let api = APIBuilder::new()
+        .with_media_engine(media_engine)
+        .with_interceptor_registry(registry)
+        .build();
+    let peer = Arc::new(api.new_peer_connection(RTCConfiguration::default()).await?);
+    let track = Arc::new(TrackLocalStaticSample::new(
+        RTCRtpCodecCapability {
+            mime_type: MIME_TYPE_H264.to_owned(),
+            clock_rate: 90_000,
+            sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+                .to_string(),
+            ..Default::default()
+        },
+        "simx-video".to_string(),
+        config.slug.clone(),
+    ));
+    let sender = peer
+        .add_track(track.clone() as Arc<dyn TrackLocal + Send + Sync>)
+        .await?;
+    let rtcp_source = encoded_source.clone();
+    tokio::spawn(async move {
+        while let Ok((packets, _)) = sender.read_rtcp().await {
+            if !packets.is_empty() {
+                let _ = rtcp_source.request_keyframe();
+            }
+        }
+    });
+    let stats_config = config.clone();
+    peer.on_peer_connection_state_change(Box::new(move |state: RTCPeerConnectionState| {
+        let stats_config = stats_config.clone();
+        Box::pin(async move {
+            update_stats(&stats_config, |stats| {
+                stats.webrtc_connection_state = Some(state.to_string());
+            });
+        })
+    }));
+
+    peer.set_remote_description(RTCSessionDescription::offer(offer.sdp)?)
+        .await?;
+    let answer = peer.create_answer(None).await?;
+    let mut gather_complete = peer.gathering_complete_promise().await;
+    peer.set_local_description(answer).await?;
+    let _ = gather_complete.recv().await;
+    let local_description = peer
+        .local_description()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("missing local WebRTC description"))?;
+    let body = serde_json::to_vec(&serde_json::json!({
+        "type": "webrtcAnswer",
+        "status": "ok",
+        "slug": config.slug,
+        "transport": "webrtc",
+        "offer": {
+            "sdpBytes": summary.sdp_bytes,
+            "hasVideoMLine": summary.has_video_mline,
+            "advertisesH264": summary.advertises_h264
+        },
+        "answer": {
+            "type": "answer",
+            "sdp": local_description.sdp
+        },
+        "hid": {
+            "mode": "websocket",
+            "websocket": stream_path(&config.slug)
+        },
+        "media": {
+            "codec": "H.264/AVC",
+            "source": "EncodedFrameSource::start_h264",
+            "rtpPacketization": "RFC 6184 packetization-mode=1",
+            "clockRateHz": 90000
+        }
+    }))?;
+    answer_tx
+        .send(Ok(body))
+        .map_err(|_| anyhow::anyhow!("WebRTC answer receiver was dropped"))?;
+
+    send_webrtc_h264_samples(config, encoded_source, track, peer).await
+}
+
+async fn send_webrtc_h264_samples(
+    config: ServeConfig,
+    encoded_source: Arc<EncodedFrameSource>,
+    track: Arc<TrackLocalStaticSample>,
+    peer: Arc<webrtc::peer_connection::RTCPeerConnection>,
+) -> anyhow::Result<()> {
+    let frame_interval = Duration::from_secs_f64(1.0 / config.fps.max(1) as f64);
+    let mut last_sent_generation = 0_u64;
+    let mut last_lease_check = Instant::now();
+    record_stream_activity(&config);
+    if let Err(error) = encoded_source.request_keyframe() {
+        eprintln!("webrtc keyframe request error: {error:#}");
+    }
+    loop {
+        match peer.connection_state() {
+            RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed => break,
+            _ => {}
+        }
+        if last_lease_check.elapsed() >= Duration::from_secs(1) {
+            if !lease_is_active(&config)? {
+                break;
+            }
+            last_lease_check = Instant::now();
+        }
+        if webrtc_media_paused_after_idle_timeout(&config, Instant::now()) {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            continue;
+        }
+        if let Some(frame) = encoded_source.latest_frame_after(last_sent_generation) {
+            if !frame.keyframe && frame.received_at.elapsed() > MAX_H264_DELIVERY_AGE {
+                let _ = encoded_source.request_keyframe();
+                tokio::time::sleep(frame_interval).await;
+                continue;
+            }
+            let dropped = frame
+                .generation
+                .saturating_sub(last_sent_generation)
+                .saturating_sub(1);
+            last_sent_generation = frame.generation;
+            let data = h264_sample_annex_b(&frame)?;
+            let bytes = data.len();
+            track
+                .write_sample(&Sample {
+                    data: data.into(),
+                    timestamp: SystemTime::now(),
+                    duration: frame_interval,
+                    packet_timestamp: 0,
+                    prev_dropped_packets: dropped.min(u16::MAX as u64) as u16,
+                    prev_padding_packets: 0,
+                })
+                .await?;
+            update_stats(&config, |stats| {
+                let now = Instant::now();
+                stats.sent_frames = stats.sent_frames.saturating_add(1);
+                stats.dropped_frames = stats.dropped_frames.saturating_add(dropped);
+                stats.last_frame_bytes = bytes;
+                stats.last_sent_at = Some(now);
+                stats.last_delivery_latency_ms =
+                    Some(now.duration_since(frame.received_at).as_millis());
+                stats.webrtc_frames = stats.webrtc_frames.saturating_add(1);
+                stats.webrtc_bytes = stats.webrtc_bytes.saturating_add(bytes as u64);
+                push_sample(&mut stats.sent_samples, now, Duration::from_secs(5));
+                push_byte_sample(&mut stats.byte_samples, now, bytes, Duration::from_secs(5));
+            });
+        }
+        tokio::time::sleep(frame_interval).await;
+    }
+    let _ = peer.close().await;
+    Ok(())
+}
+
+fn h264_sample_annex_b(frame: &EncodedFrame) -> anyhow::Result<Vec<u8>> {
+    let mut sample = Vec::with_capacity(
+        frame.bytes.len()
+            + frame
+                .decoder_config
+                .as_ref()
+                .map(|config| config.len())
+                .unwrap_or_default()
+            + 16,
+    );
+    if frame.keyframe {
+        if let Some(config) = &frame.decoder_config {
+            append_avcc_decoder_config_annex_b(config, &mut sample);
+        }
+    }
+    append_avcc_access_unit_annex_b(&frame.bytes, &mut sample)?;
+    Ok(sample)
+}
+
+fn append_avcc_access_unit_annex_b(bytes: &[u8], output: &mut Vec<u8>) -> anyhow::Result<()> {
+    let mut offset = 0;
+    while offset + 4 <= bytes.len() {
+        let length = u32::from_be_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ]) as usize;
+        offset += 4;
+        if length == 0 || offset + length > bytes.len() {
+            bail!("invalid AVCC H.264 access unit");
+        }
+        output.extend_from_slice(&[0, 0, 0, 1]);
+        output.extend_from_slice(&bytes[offset..offset + length]);
+        offset += length;
+    }
+    if offset != bytes.len() {
+        bail!("trailing bytes in AVCC H.264 access unit");
+    }
+    Ok(())
+}
+
+fn append_avcc_decoder_config_annex_b(config: &[u8], output: &mut Vec<u8>) {
+    if config.len() < 9 {
+        return;
+    }
+    let sps_count_index = if config.get(5).map(|value| value & 0x1f) == Some(1) {
+        5
+    } else {
+        6
+    };
+    let sps_count = config[sps_count_index] & 0x1f;
+    let mut offset = sps_count_index + 1;
+    for _ in 0..sps_count {
+        if offset + 2 > config.len() {
+            return;
+        }
+        let length = u16::from_be_bytes([config[offset], config[offset + 1]]) as usize;
+        offset += 2;
+        if length == 0 || offset + length > config.len() {
+            return;
+        }
+        output.extend_from_slice(&[0, 0, 0, 1]);
+        output.extend_from_slice(&config[offset..offset + length]);
+        offset += length;
+    }
+    if offset >= config.len() {
+        return;
+    }
+    let pps_count = config[offset];
+    offset += 1;
+    for _ in 0..pps_count {
+        if offset + 2 > config.len() {
+            return;
+        }
+        let length = u16::from_be_bytes([config[offset], config[offset + 1]]) as usize;
+        offset += 2;
+        if length == 0 || offset + length > config.len() {
+            return;
+        }
+        output.extend_from_slice(&[0, 0, 0, 1]);
+        output.extend_from_slice(&config[offset..offset + length]);
+        offset += length;
+    }
 }
 
 fn h264_frame_message(frame: &EncodedFrame) -> Vec<u8> {
@@ -510,6 +805,7 @@ fn stream_frames(
         stats.connected_clients = stats.connected_clients.saturating_add(1);
         stats.target_fps = config.fps;
         stats.paused = false;
+        stats.last_activity_at = Some(last_activity);
         stats.controller_connected = match config.control_mode {
             StreamControlMode::ReadOnly => false,
             StreamControlMode::SingleController => stats.controller_connected || is_controller,
@@ -543,14 +839,13 @@ fn stream_frames(
                     if is_resume_message(&text) {
                         paused = false;
                         next_frame_at = Instant::now();
-                        last_activity = Instant::now();
-                        update_stats(&config, |stats| stats.paused = false);
+                        last_activity = record_stream_activity(&config);
                         write_ws_text(&mut stream, r#"{"type":"resumed"}"#)?;
                     } else if is_claim_control_message(&text)
                         && config.control_mode == StreamControlMode::Claim
                     {
                         claim_controller(&config, client_id);
-                        last_activity = Instant::now();
+                        last_activity = record_stream_activity(&config);
                         write_client_message(&mut stream, &config, "controller", None)?;
                         if let Some(ack) = input_ack(&text, true, "ok") {
                             write_ws_text(&mut stream, &ack)?;
@@ -559,7 +854,7 @@ fn stream_frames(
                         .control_mode
                         .can_send_input(&config, client_id, is_controller)
                     {
-                        last_activity = Instant::now();
+                        last_activity = record_stream_activity(&config);
                         match handle_hid_input(frame_source.as_ref(), &text) {
                             Ok(acks) => {
                                 for ack in acks {
@@ -696,6 +991,7 @@ fn stream_h264_frames(
         stats.connected_clients = stats.connected_clients.saturating_add(1);
         stats.target_fps = config.fps;
         stats.paused = false;
+        stats.last_activity_at = Some(last_activity);
         stats.controller_connected = match config.control_mode {
             StreamControlMode::ReadOnly => false,
             StreamControlMode::SingleController => stats.controller_connected || is_controller,
@@ -732,8 +1028,7 @@ fn stream_h264_frames(
                     if is_resume_message(&text) {
                         paused = false;
                         next_frame_at = Instant::now();
-                        last_activity = Instant::now();
-                        update_stats(&config, |stats| stats.paused = false);
+                        last_activity = record_stream_activity(&config);
                         if let Err(error) = encoded_source.request_keyframe() {
                             eprintln!("keyframe request error: {error:#}");
                         }
@@ -769,7 +1064,7 @@ fn stream_h264_frames(
                         && config.control_mode == StreamControlMode::Claim
                     {
                         claim_controller(&config, client_id);
-                        last_activity = Instant::now();
+                        last_activity = record_stream_activity(&config);
                         write_client_message(&mut stream, &config, "controller", Some("h264"))?;
                         if let Some(ack) = input_ack(&text, true, "ok") {
                             write_ws_text(&mut stream, &ack)?;
@@ -778,7 +1073,7 @@ fn stream_h264_frames(
                         .control_mode
                         .can_send_input(&config, client_id, is_controller)
                     {
-                        last_activity = Instant::now();
+                        last_activity = record_stream_activity(&config);
                         match handle_hid_input(encoded_source.as_ref(), &text) {
                             Ok(acks) => {
                                 for ack in acks {
@@ -1081,6 +1376,29 @@ fn update_stats(config: &ServeConfig, update: impl FnOnce(&mut StreamStats)) {
         }
         update(&mut stats);
     }
+}
+
+fn record_stream_activity(config: &ServeConfig) -> Instant {
+    let now = Instant::now();
+    update_stats(config, |stats| {
+        stats.paused = false;
+        stats.last_activity_at = Some(now);
+    });
+    now
+}
+
+fn webrtc_media_paused_after_idle_timeout(config: &ServeConfig, now: Instant) -> bool {
+    let Ok(mut stats) = config.stats.lock() else {
+        return false;
+    };
+    if stats.started_at.is_none() {
+        stats.started_at = Some(now);
+    }
+    let last_activity_at = *stats.last_activity_at.get_or_insert(now);
+    if !stats.paused && now.duration_since(last_activity_at) >= config.idle_timeout {
+        stats.paused = true;
+    }
+    stats.paused
 }
 
 fn push_sample(samples: &mut VecDeque<Instant>, now: Instant, window: Duration) {
@@ -2118,10 +2436,11 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        acquire_controller, claim_controller, h264_codec_string, h264_stream_path, input_ack,
-        is_claim_control_message, is_keyframe_request_message, is_resume_message,
-        is_unacknowledged_touch_move, lease_is_active, parse_next_ws_event, slug_path,
-        slug_path_slash, stats_path, stream_path, validate_webrtc_offer, webrtc_descriptor_path,
+        acquire_controller, claim_controller, h264_codec_string, h264_sample_annex_b,
+        h264_stream_path, input_ack, is_claim_control_message, is_keyframe_request_message,
+        is_resume_message, is_unacknowledged_touch_move, lease_is_active, parse_next_ws_event,
+        record_stream_activity, slug_path, slug_path_slash, stats_path, stream_path,
+        validate_webrtc_offer, webrtc_descriptor_path, webrtc_media_paused_after_idle_timeout,
         webrtc_offer_path, websocket_accept, EncodedFrame, EncodedFrameContext, EncodedFrameSource,
         LatestEncodedFrame, NativeFrameSource, ServeConfig, StreamControlMode, StreamStats,
         StreamTransport, WsEvent,
@@ -2237,6 +2556,69 @@ mod tests {
         .unwrap_err();
 
         assert!(error.contains("video"));
+    }
+
+    #[test]
+    fn webrtc_media_pauses_after_shared_idle_timeout_and_resumes_on_activity() {
+        let mut config = test_serve_config(StreamControlMode::Shared);
+        config.idle_timeout = Duration::from_millis(100);
+
+        let activity_at = record_stream_activity(&config);
+
+        assert!(!webrtc_media_paused_after_idle_timeout(
+            &config,
+            activity_at + Duration::from_millis(99)
+        ));
+        assert!(webrtc_media_paused_after_idle_timeout(
+            &config,
+            activity_at + Duration::from_millis(100)
+        ));
+        assert!(config.stats.lock().unwrap().paused);
+
+        let resumed_at = record_stream_activity(&config);
+
+        assert!(!webrtc_media_paused_after_idle_timeout(&config, resumed_at));
+        assert!(!config.stats.lock().unwrap().paused);
+    }
+
+    #[test]
+    fn converts_avcc_access_units_to_annex_b_samples() {
+        let frame = EncodedFrame {
+            generation: 1,
+            bytes: vec![0, 0, 0, 3, 0x65, 0xaa, 0xbb, 0, 0, 0, 2, 0x41, 0xcc],
+            keyframe: false,
+            pts_ms: 0,
+            decoder_config: None,
+            received_at: Instant::now(),
+        };
+
+        let sample = h264_sample_annex_b(&frame).unwrap();
+
+        assert_eq!(
+            sample,
+            vec![0, 0, 0, 1, 0x65, 0xaa, 0xbb, 0, 0, 0, 1, 0x41, 0xcc]
+        );
+    }
+
+    #[test]
+    fn prepends_decoder_config_for_webrtc_keyframes() {
+        let frame = EncodedFrame {
+            generation: 1,
+            bytes: vec![0, 0, 0, 2, 0x65, 0xaa],
+            keyframe: true,
+            pts_ms: 0,
+            decoder_config: Some(vec![
+                1, 0x42, 0xe0, 0x1f, 0xff, 0xff, 0xe1, 0, 3, 0x67, 0x42, 0x00, 1, 0, 2, 0x68, 0xce,
+            ]),
+            received_at: Instant::now(),
+        };
+
+        let sample = h264_sample_annex_b(&frame).unwrap();
+
+        assert_eq!(
+            sample,
+            vec![0, 0, 0, 1, 0x67, 0x42, 0x00, 0, 0, 0, 1, 0x68, 0xce, 0, 0, 0, 1, 0x65, 0xaa,]
+        );
     }
 
     #[test]
